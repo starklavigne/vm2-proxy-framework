@@ -90,7 +90,12 @@ class Document {
             if (selector === 'body') return this.body;
             if (selector === 'head') return this.head;
             if (selector === 'html') return this.documentElement;
-            if (selector.startsWith('#')) return this.getElementById(selector.slice(1));
+
+            if (selector.startsWith('#')) {
+                const id = selector.slice(1);
+                // 复用 getElementById 的自动创建逻辑
+                return this.getElementById(id);
+            }
             const tag = selector.toUpperCase();
             const els = this.getElementsByTagName(tag);
             return els.length > 0 ? els[0] : null;

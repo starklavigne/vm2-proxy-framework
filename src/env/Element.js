@@ -2,7 +2,6 @@ const createStyleProxy = require('./CSSStyleDeclaration');
 const DOMTokenList = require('./DOMTokenList');
 const NamedNodeMap = require('./NamedNodeMap');
 
-// 懒加载集合类
 let HTMLCollection, NodeList;
 try {
     const dom = require('./DOMCollection');
@@ -13,11 +12,29 @@ try {
     NodeList = Array;
 }
 
+// 僵尸节点防御机制
+class ZombieElement {
+    constructor() {
+        this.tagName = 'ZOMBIE';
+        this.nodeType = 1;
+        this.style = {};
+        this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false };
+    }
+    insertBefore() { return null; }
+    appendChild(child) { return child; }
+    removeChild(child) { return child; }
+    replaceChild(newChild) { return newChild; }
+    getAttribute() { return null; }
+    setAttribute() {}
+    get children() { return []; }
+    get childNodes() { return []; }
+}
+const theZombie = new ZombieElement();
+
 class Element {
     constructor(tagName = 'div', context = null) {
         this.tagName = (tagName || 'DIV').toUpperCase();
         this._context = context;
-        // 【核心修复】唯一身份标识，用于穿透 Proxy
         this._uid = 'el_' + Math.random().toString(36).slice(2) + Date.now();
 
         this._children = [];
@@ -38,21 +55,14 @@ class Element {
         this.detachEvent = undefined;
         this.fireEvent = undefined;
 
-        if (this.tagName === 'IFRAME') {
-            this._setupIframe(context);
-        }
+        if (this.tagName === 'IFRAME') this._setupIframe(context);
         if (this.tagName === 'FORM') {
-            this.action = "";
-            this.method = "POST";
-            this.submit = () => {};
-            this.reset = () => {};
+            this.action = ""; this.method = "POST"; this.submit = () => {}; this.reset = () => {};
         }
     }
 
-    // 【核心修复】模糊查找辅助函数
     _indexOf(node) {
         if (!node) return -1;
-        // 既匹配引用，也匹配 UID (穿透 Proxy)
         return this._children.findIndex(c => c === node || (c._uid && node._uid && c._uid === node._uid));
     }
 
@@ -60,6 +70,7 @@ class Element {
         const iframeDoc = new Element('#DOCUMENT', context);
         iframeDoc.nodeType = 9;
         iframeDoc.tagName = null;
+        iframeDoc._uid = 'doc_iframe_' + Date.now();
 
         const html = new Element('HTML', context);
         const head = new Element('HEAD', context);
@@ -106,17 +117,16 @@ class Element {
         this.contentDocument = iframeDoc;
     }
 
-    // --- Accessors ---
+    get parentNode() { return this._parentNode || theZombie; }
+    set parentNode(node) { this._parentNode = node; }
+
     get children() { return new HTMLCollection(this._children.filter(c => c.nodeType === 1)); }
     get childNodes() { return new NodeList(this._children); }
     get firstChild() { return this._children[0] || null; }
     get lastChild() { return this._children[this._children.length - 1] || null; }
 
-    get parentNode() { return this._parentNode || null; }
-    set parentNode(node) { this._parentNode = node; }
-
     get nextSibling() {
-        if(!this._parentNode) return null;
+        if(!this._parentNode || this._parentNode === theZombie) return null;
         const idx = this._parentNode._indexOf(this);
         return this._parentNode._children[idx + 1] || null;
     }
@@ -136,14 +146,15 @@ class Element {
         }
     }
 
-    // --- DOM Ops (使用 _indexOf) ---
-
     appendChild(child) {
         if (!child) return null;
-        // 如果已存在，先移除
-        if (this._indexOf(child) >= 0) {
-             this.removeChild(child);
+        if (child.nodeType === 11) {
+            const fragChildren = [...child._children];
+            fragChildren.forEach(c => this.appendChild(c));
+            child._children = [];
+            return child;
         }
+        if (this._indexOf(child) >= 0) this.removeChild(child);
         child.parentNode = this;
         this._children.push(child);
         return child;
@@ -153,7 +164,7 @@ class Element {
         const i = this._indexOf(child);
         if (i >= 0) {
             this._children.splice(i, 1);
-            child.parentNode = null;
+            child._parentNode = null;
         }
         return child;
     }
@@ -161,71 +172,40 @@ class Element {
     insertBefore(newNode, refNode) {
         if (!newNode) return null;
         if (!refNode) return this.appendChild(newNode);
-
-        const i = this._indexOf(refNode); // 使用 UID 匹配
+        if (newNode.nodeType === 11) {
+            const fragChildren = [...newNode._children];
+            for (let k = fragChildren.length - 1; k >= 0; k--) {
+                this.insertBefore(fragChildren[k], refNode);
+            }
+            newNode._children = [];
+            return newNode;
+        }
+        const i = this._indexOf(refNode);
         if (i >= 0) {
+            if (newNode.parentNode && newNode.parentNode !== theZombie) newNode.parentNode.removeChild(newNode);
             newNode.parentNode = this;
             this._children.splice(i, 0, newNode);
         } else {
-            // 容错：如果找不到参照物，追加到末尾
             this.appendChild(newNode);
         }
         return newNode;
-    }
+    };
 
     replaceChild(newChild, oldChild) {
         const i = this._indexOf(oldChild);
         if (i >= 0) {
+            if (newChild.parentNode && newChild.parentNode !== theZombie) newChild.parentNode.removeChild(newChild);
             newChild.parentNode = this;
             this._children[i] = newChild;
-            oldChild.parentNode = null;
+            oldChild._parentNode = null;
             return oldChild;
         }
         return this.appendChild(newChild);
     }
 
-    // --- Query ---
-    querySelector(selector) {
-        if (!selector) return null;
-        if (selector.startsWith('#')) {
-            const id = selector.slice(1);
-            const find = (node) => {
-                if (node.id === id) return node;
-                for (const c of node._children) {
-                    const r = find(c);
-                    if (r) return r;
-                }
-                return null;
-            }
-            return find(this);
-        }
-        const tag = selector.toUpperCase();
-        const find = (node) => {
-             if (node.tagName === tag) return node;
-             for (const c of node._children) {
-                 const r = find(c);
-                 if (r) return r;
-             }
-             return null;
-        };
-        return find(this) || null;
-    }
-
-    getElementsByTagName(tagName) {
-        const tag = tagName.toUpperCase();
-        const result = [];
-        const traverse = (node) => {
-            for (const child of node._children) {
-                if (child.nodeType === 1) {
-                    if (tag === '*' || child.tagName === tag) result.push(child);
-                    traverse(child);
-                }
-            }
-        };
-        traverse(this);
-        return new HTMLCollection(result);
-    }
-
+    // 查询方法已在 HTMLNode.js 中通过 Mixin 覆盖，这里仅保留基础结构
+    querySelector(selector) { return null; }
+    getElementsByTagName(tagName) { return new HTMLCollection([]); }
     getElementsByClassName(className) { return new HTMLCollection([]); }
 
     getAttribute(name) { return this._attributes[name] || this[name] || null; }
@@ -240,8 +220,13 @@ class Element {
     get href() { return this._attributes['href'] || ''; }
     set href(val) { this._attributes['href'] = val; }
 
-    getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0, x: 0, y: 0, bottom: 0, right: 0 }; }
-    getClientRects() { return [{ top: 0, left: 0, width: 0, height: 0 }]; }
+    // 【核心修复】返回非零尺寸，防止被识别为 Hidden/Headless
+    getBoundingClientRect() {
+        return { top: 0, left: 0, width: 800, height: 600, x: 0, y: 0, bottom: 600, right: 800 };
+    }
+    getClientRects() {
+        return [{ top: 0, left: 0, width: 800, height: 600 }];
+    }
 
     focus() {}
     blur() {}
