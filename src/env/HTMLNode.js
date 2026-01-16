@@ -7,8 +7,13 @@ const nativize = (func, name) => {
     if (typeof func !== 'function') return func;
     const funcName = name || func.name || '';
     const nativeString = `function ${funcName}() { [native code] }`;
-    Object.defineProperty(func, 'toString', { value: () => nativeString, writable: true, configurable: true, enumerable: false });
-    Object.defineProperty(func, 'name', { value: funcName, writable: false, configurable: true, enumerable: false });
+    Object.defineProperty(func, 'toString', {
+        value: () => nativeString,
+        writable: true,
+        configurable: true,
+        enumerable: false
+    });
+    Object.defineProperty(func, 'name', {value: funcName, writable: false, configurable: true, enumerable: false});
     return func;
 };
 
@@ -20,8 +25,12 @@ const createStyleProxy = () => {
     return new Proxy(_values, {
         get: (target, prop) => {
             if (prop === 'getPropertyValue') return nativize((n) => target[n] || "", 'getPropertyValue');
-            if (prop === 'setProperty') return nativize((n, v) => { target[n] = String(v); }, 'setProperty');
-            if (prop === 'removeProperty') return nativize((n) => { delete target[n]; }, 'removeProperty');
+            if (prop === 'setProperty') return nativize((n, v) => {
+                target[n] = String(v);
+            }, 'setProperty');
+            if (prop === 'removeProperty') return nativize((n) => {
+                delete target[n];
+            }, 'removeProperty');
             if (prop === 'item') return nativize(() => "", 'item');
             return target[prop] || '';
         },
@@ -40,27 +49,76 @@ class ZombieElement {
         this.tagName = 'ZOMBIE';
         this.nodeType = 1;
         this.style = createStyleProxy(); // 【关键】僵尸必须有 style，否则 null.style 后的 obj.style 会崩
-        this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false, toggle:()=>{} };
+        this.classList = {
+            add: () => {
+            }, remove: () => {
+            }, contains: () => false, toggle: () => {
+            }
+        };
         this._children = [];
         this.id = '';
     }
-    insertBefore() { return this; }
-    appendChild(child) { return child; } // 假装添加成功
-    removeChild(child) { return child; }
-    replaceChild(n) { return n; }
-    getAttribute() { return null; }
-    setAttribute() {}
-    querySelector() { return this; } // 无限套娃，防止链式调用崩溃
-    querySelectorAll() { return []; }
-    getElementsByTagName() { return []; }
-    get parentNode() { return this; }
-    get children() { return []; }
-    get firstChild() { return null; }
-    get nextSibling() { return null; }
-    contains() { return false; }
-    focus() {}
-    blur() {}
+
+    insertBefore() {
+        return this;
+    }
+
+    appendChild(child) {
+        return child;
+    } // 假装添加成功
+    removeChild(child) {
+        return child;
+    }
+
+    replaceChild(n) {
+        return n;
+    }
+
+    getAttribute() {
+        return null;
+    }
+
+    setAttribute() {
+    }
+
+    querySelector() {
+        return this;
+    } // 无限套娃，防止链式调用崩溃
+    querySelectorAll() {
+        return [];
+    }
+
+    getElementsByTagName() {
+        return [];
+    }
+
+    get parentNode() {
+        return this;
+    }
+
+    get children() {
+        return [];
+    }
+
+    get firstChild() {
+        return null;
+    }
+
+    get nextSibling() {
+        return null;
+    }
+
+    contains() {
+        return false;
+    }
+
+    focus() {
+    }
+
+    blur() {
+    }
 }
+
 const theZombie = new ZombieElement();
 
 // ==========================================
@@ -117,25 +175,38 @@ class Element {
         this.tagName = (tagName || 'DIV').toUpperCase();
 
         Object.defineProperties(this, {
-            '_context': { value: context, writable: true, enumerable: false },
-            '_children': { value: [], writable: true, enumerable: false },
-            '_attributes': { value: {}, writable: true, enumerable: false },
-            '_parentNode': { value: null, writable: true, enumerable: false },
+            '_context': {value: context, writable: true, enumerable: false},
+            '_children': {value: [], writable: true, enumerable: false},
+            '_attributes': {value: {}, writable: true, enumerable: false},
+            '_parentNode': {value: null, writable: true, enumerable: false},
         });
 
         this.style = createStyleProxy();
 
         this.nodeType = 1;
         this.id = "";
-        this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false, toggle:()=>{} };
+        this.classList = {
+            add: () => {
+            }, remove: () => {
+            }, contains: () => false, toggle: () => {
+            }
+        };
         this.ownerDocument = context ? context.document : null;
     }
 
     // 1. parentNode 保护 (Getter 返回 Zombie, Setter 允许赋值)
-    get parentNode() { return this._parentNode || theZombie; }
-    set parentNode(node) { this._parentNode = node; }
+    get parentNode() {
+        return this._parentNode || theZombie;
+    }
 
-    get innerHTML() { return ""; }
+    set parentNode(node) {
+        this._parentNode = node;
+    }
+
+    get innerHTML() {
+        return "";
+    }
+
     set innerHTML(val) {
         this._children.length = 0;
         const str = String(val);
@@ -143,13 +214,26 @@ class Element {
         try {
             const nodes = parseHTML(str, this._context, Element);
             nodes.forEach(node => this.appendChild(node));
-        } catch (e) { }
+        } catch (e) {
+        }
     }
 
-    get children() { return this._children; }
-    get childNodes() { return this._children; }
-    get firstChild() { return this._children[0] || null; }
-    get lastChild() { return this._children[this._children.length - 1] || null; }
+    get children() {
+        return this._children;
+    }
+
+    get childNodes() {
+        return this._children;
+    }
+
+    get firstChild() {
+        return this._children[0] || null;
+    }
+
+    get lastChild() {
+        return this._children[this._children.length - 1] || null;
+    }
+
     get nextSibling() {
         if (!this._parentNode || this._parentNode === theZombie) return null;
         const idx = this._parentNode._children.indexOf(this);
@@ -216,13 +300,22 @@ class Element {
         return this.appendChild(newChild);
     }
 
-    getAttribute(name) { return this._attributes[name] || null; }
+    getAttribute(name) {
+        return this._attributes[name] || null;
+    }
+
     setAttribute(name, value) {
         this._attributes[name] = String(value);
         if (name === 'id') this.id = value;
     }
-    removeAttribute(name) { delete this._attributes[name]; }
-    hasAttribute(name) { return Object.prototype.hasOwnProperty.call(this._attributes, name); }
+
+    removeAttribute(name) {
+        delete this._attributes[name];
+    }
+
+    hasAttribute(name) {
+        return Object.prototype.hasOwnProperty.call(this._attributes, name);
+    }
 
     getElementsByTagName(tagName) {
         const tag = tagName.toUpperCase();
@@ -235,64 +328,76 @@ class Element {
         return res;
     }
 
-    // 【核心修复】querySelector 绝对不返回 null
+// 【核心修复】querySelector: 找不到元素时返回 Zombie，防止 .style 报错
     querySelector(selector) {
         if (!selector) return theZombie; // 空选择器返回僵尸
 
-        // 1. 尝试查找
+        // 1. ID 选择器 (#id)
         if (selector.startsWith('#')) {
             const id = selector.slice(1);
-            const traverse = (node) => {
+
+            const traverseId = (node) => {
                 if (node.id === id) return node;
-                for (const c of node._children) {
-                    const r = traverse(c);
-                    if (r) return r;
+                if (node._children) {
+                    for (const child of node._children) {
+                        const res = traverseId(child);
+                        if (res) return res;
+                    }
                 }
                 return null;
-            }
-            if (this.id === id) return this;
+            };
+
             let found = null;
             for (const child of this._children) {
-                found = traverse(child);
+                found = traverseId(child);
                 if (found) break;
             }
 
-            // 2. 找不到？自动创建！
-            if (!found) {
-                console.log(`[DOM] Auto-creating missing element #${id}`);
-                const el = new Element('DIV', this._context);
-                el.id = id;
-                this.appendChild(el);
-                return el;
-            }
-            return found;
+            // 关键修改：找不到时不返回 null，而是返回僵尸节点
+            // 这样 .style 不会报错，同时也不会污染真实的 DOM 树
+            return found || theZombie;
         }
 
-        // Tag 查找
+        // 2. Tag 选择器 (DIV, SPAN...)
         const tag = selector.toUpperCase();
+
         const traverseTag = (node) => {
             if (node.tagName === tag) return node;
-            for (const c of node._children) {
-                const r = traverseTag(c);
-                if (r) return r;
+            if (node._children) {
+                for (const c of node._children) {
+                    const r = traverseTag(c);
+                    if (r) return r;
+                }
             }
             return null;
-        }
-        let foundTag = traverseTag(this);
+        };
 
-        // 找不到 Tag？返回僵尸节点 (防止 null.style 报错)
-        if (!foundTag) {
-            // console.warn(`[DOM] Selector '${selector}' not found, returning Zombie.`);
-            return theZombie;
+        let foundTag = null;
+        for (const child of this._children) {
+            foundTag = traverseTag(child);
+            if (foundTag) break;
         }
-        return foundTag;
+
+        // 关键修改：找不到时返回僵尸节点
+        return foundTag || theZombie;
     }
 
-    getBoundingClientRect() { return { top: 0, left: 0, width: 800, height: 600, x: 0, y: 0 }; }
-    getClientRects() { return [{ top: 0, left: 0, width: 800, height: 600 }]; }
-    focus() {}
-    blur() {}
-    click() {}
+    getBoundingClientRect() {
+        return {top: 0, left: 0, width: 800, height: 600, x: 0, y: 0};
+    }
+
+    getClientRects() {
+        return [{top: 0, left: 0, width: 800, height: 600}];
+    }
+
+    focus() {
+    }
+
+    blur() {
+    }
+
+    click() {
+    }
 }
 
 ['appendChild', 'removeChild', 'insertBefore', 'replaceChild', 'getAttribute', 'setAttribute', 'getElementsByTagName', 'querySelector', 'contains'].forEach(method => {
@@ -302,29 +407,149 @@ class Element {
 // ==========================================
 // 6. 具体元素类
 // ==========================================
-class HTMLElement extends Element { constructor(t, c) { super(t, c); } }
-class HTMLDivElement extends HTMLElement { constructor(c) { super('DIV', c); } }
-class HTMLSpanElement extends HTMLElement { constructor(c) { super('SPAN', c); } }
-class HTMLAnchorElement extends HTMLElement { constructor(c) { super('A', c); } get href() {return this.getAttribute('href')||'';} set href(v){this.setAttribute('href',v);} }
-class HTMLFormElement extends HTMLElement { constructor(c) { super('FORM', c); } }
-class HTMLInputElement extends HTMLElement { constructor(c) { super('INPUT', c); } get value(){return this.getAttribute('value')||'';} set value(v){this.setAttribute('value',v);} }
-class HTMLButtonElement extends HTMLElement { constructor(c) { super('BUTTON', c); } }
-class HTMLImageElement extends HTMLElement { constructor(c) { super('IMG', c); } }
-class HTMLCanvasElement extends HTMLElement { constructor(c) { super('CANVAS', c); } }
-class HTMLScriptElement extends HTMLElement { constructor(c) { super('SCRIPT', c); } }
+class HTMLElement extends Element {
+    constructor(t, c) {
+        super(t, c);
+    }
+}
+
+class HTMLDivElement extends HTMLElement {
+    constructor(c) {
+        super('DIV', c);
+    }
+}
+
+class HTMLSpanElement extends HTMLElement {
+    constructor(c) {
+        super('SPAN', c);
+    }
+}
+
+class HTMLAnchorElement extends HTMLElement {
+    constructor(c) {
+        super('A', c);
+    }
+
+    get href() {
+        return this.getAttribute('href') || '';
+    }
+
+    set href(v) {
+        this.setAttribute('href', v);
+    }
+}
+
+class HTMLFormElement extends HTMLElement {
+    constructor(c) {
+        super('FORM', c);
+    }
+}
+
+class HTMLInputElement extends HTMLElement {
+    constructor(c) {
+        super('INPUT', c);
+    }
+
+    get value() {
+        return this.getAttribute('value') || '';
+    }
+
+    set value(v) {
+        this.setAttribute('value', v);
+    }
+}
+
+class HTMLButtonElement extends HTMLElement {
+    constructor(c) {
+        super('BUTTON', c);
+    }
+}
+
+class HTMLImageElement extends HTMLElement {
+    constructor(c) {
+        super('IMG', c);
+    }
+}
+
+class HTMLCanvasElement extends HTMLElement {
+    constructor(c) {
+        super('CANVAS', c);
+    }
+}
+
+class HTMLScriptElement extends HTMLElement {
+    constructor(c) {
+        super('SCRIPT', c);
+    }
+}
+
 class HTMLIFrameElement extends HTMLElement {
     constructor(c) {
         super('IFRAME', c);
         this.contentWindow = c ? c.window : {};
     }
 }
-class HTMLBodyElement extends HTMLElement { constructor(c) { super('BODY', c); } }
-class HTMLHeadElement extends HTMLElement { constructor(c) { super('HEAD', c); } }
-class HTMLHtmlElement extends HTMLElement { constructor(c) { super('HTML', c); } }
 
-class SVGElement extends Element { constructor(t, c) { super(t, c); this.namespaceURI = "http://www.w3.org/2000/svg"; } }
-class SVGGraphicsElement extends SVGElement { constructor(t, c) { super(t, c); } getBBox(){return {x:0,y:0,width:0,height:0};} getCTM(){return{a:1,b:0,c:0,d:1,e:0,f:0};} getScreenCTM(){return{a:1,b:0,c:0,d:1,e:0,f:0};} }
-class SVGSVGElement extends SVGGraphicsElement { constructor(c) { super('svg', c); } createSVGPoint(){return{x:0,y:0};} createSVGMatrix(){return{a:1,b:0,c:0,d:1,e:0,f:0};} createSVGRect(){return{x:0,y:0,width:0,height:0};} }
+class HTMLBodyElement extends HTMLElement {
+    constructor(c) {
+        super('BODY', c);
+    }
+}
+
+class HTMLHeadElement extends HTMLElement {
+    constructor(c) {
+        super('HEAD', c);
+    }
+}
+
+class HTMLHtmlElement extends HTMLElement {
+    constructor(c) {
+        super('HTML', c);
+    }
+}
+
+class SVGElement extends Element {
+    constructor(t, c) {
+        super(t, c);
+        this.namespaceURI = "http://www.w3.org/2000/svg";
+    }
+}
+
+class SVGGraphicsElement extends SVGElement {
+    constructor(t, c) {
+        super(t, c);
+    }
+
+    getBBox() {
+        return {x: 0, y: 0, width: 0, height: 0};
+    }
+
+    getCTM() {
+        return {a: 1, b: 0, c: 0, d: 1, e: 0, f: 0};
+    }
+
+    getScreenCTM() {
+        return {a: 1, b: 0, c: 0, d: 1, e: 0, f: 0};
+    }
+}
+
+class SVGSVGElement extends SVGGraphicsElement {
+    constructor(c) {
+        super('svg', c);
+    }
+
+    createSVGPoint() {
+        return {x: 0, y: 0};
+    }
+
+    createSVGMatrix() {
+        return {a: 1, b: 0, c: 0, d: 1, e: 0, f: 0};
+    }
+
+    createSVGRect() {
+        return {x: 0, y: 0, width: 0, height: 0};
+    }
+}
 
 module.exports = {
     Element: nativize(Element, 'Element'),

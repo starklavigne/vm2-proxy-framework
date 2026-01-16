@@ -5,7 +5,6 @@ module.exports = {
     language: "zh-CN",
     screenWidth: 1920,
     screenHeight: 1080,
-    platform: "Win32",
+    platform: "Win32", // 确保这里是 Win32，配合 Windows UA
     hardwareConcurrency: 8,
-    // ...更多指纹
 };
