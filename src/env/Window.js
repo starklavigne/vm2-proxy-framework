@@ -2,66 +2,48 @@ const Navigator = require('./Navigator');
 const Screen = require('./Screen');
 const Performance = require('./Performance');
 const Crypto = require('./Crypto');
-// 【引入】
 const {XMLHttpRequest, Headers, FormData} = require('./NetworkMock');
+// 引入 nativize
+const { nativize } = require('../utils/tools');
 
 class Window {
     constructor(context, profile = {}) {
-        // ... (基础 globals 数组代码保持不变) ...
+        // 全局对象注入
         const globals = [
             'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp', 'Date', 'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy', 'WeakMap', 'WeakSet', 'Map', 'Set', 'DataView', 'ArrayBuffer',
             'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array', 'Uint8ClampedArray',
             'Error', 'TypeError', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError',
             'console', 'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI', 'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape'
         ];
-
         globals.forEach(prop => {
             if (context[prop]) this[prop] = context[prop];
         });
 
-        this.window = null; // 占位，由 main.js 注入 proxy
-        this.self = null;
-        this.globalThis = null;
-        this.top = null;
-        this.parent = null;
-        this.frames = null;
+        // 基础环境
+        this.window = this; // 这里的 this 稍后会被 Proxy 覆盖
+        this.self = this;
+        this.globalThis = this;
+        this.top = this;
+        this.parent = this;
+        this.frames = this;
 
-        this.navigator = new Navigator(profile);
+        this.navigator = new Navigator(profile, context);
         this.clientInformation = this.navigator;
         this.screen = new Screen(profile);
         this.performance = new Performance();
         this.crypto = new Crypto();
-
         this.document = context.document || null;
 
-        // 【关键】注册 Network 相关类
+        // Network
         this.XMLHttpRequest = XMLHttpRequest;
         this.Headers = Headers;
         this.FormData = FormData;
 
-        // atob / btoa 实现 (保持你上次更新的正确代码)
-        const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=';
-        this.atob = (input) => {
-            let str = String(input).replace(/=+$/, '');
-            let output = '';
-            if (str.length % 4 == 1) throw new Error("'atob' failed: The string to be decoded is not correctly encoded.");
-            for (let bc = 0, bs = 0, buffer, i = 0; buffer = str.charAt(i++); ~buffer && (bs = bc % 4 ? bs * 64 + buffer : buffer, bc++ % 4) ? output += String.fromCharCode(255 & bs >> (-2 * bc & 6)) : 0) {
-                buffer = chars.indexOf(buffer);
-            }
-            return output;
-        };
+        // Base64
+        this.atob = nativize((input) => Buffer.from(String(input), 'base64').toString('binary'), 'atob');
+        this.btoa = nativize((input) => Buffer.from(String(input), 'binary').toString('base64'), 'btoa');
 
-        this.btoa = (input) => {
-            let str = String(input);
-            let output = '';
-            for (let block = 0, charCode, i = 0, map = chars; str.charAt(i | 0) || (map = '=', i % 1); output += map.charAt(63 & block >> 8 - i % 1 * 8)) {
-                charCode = str.charCodeAt(i += 3 / 4);
-                if (charCode > 0xFF) throw new Error("'btoa' failed");
-                block = block << 8 | charCode;
-            }
-            return output;
-        };
-
+        // Chrome specific
         this.chrome = {
             runtime: {},
             loadTimes: () => ({}),
@@ -69,149 +51,95 @@ class Window {
             app: {isInstalled: false}
         };
 
+        // History & Location
         this.history = {
             length: 1, state: null, scrollRestoration: 'auto',
-            back: () => {
-            }, forward: () => {
-            }, go: () => {
-            },
-            pushState: (state) => {
-                this.history.state = state;
-            },
-            replaceState: (state) => {
-                this.history.state = state;
-            }
+            back: () => {}, forward: () => {}, go: () => {},
+            pushState: (state) => { this.history.state = state; },
+            replaceState: (state) => { this.history.state = state; }
         };
-
-        this.location = {
+        this.location = context.location || {
             href: "https://challenges.cloudflare.com/",
             origin: "https://challenges.cloudflare.com",
             protocol: "https:",
             host: "challenges.cloudflare.com",
             hostname: "challenges.cloudflare.com",
-            port: "",
-            pathname: "/",
-            search: "",
-            hash: "",
-            reload: () => {
-            },
-            replace: () => {
-            },
-            toString: () => "https://challenges.cloudflare.com/"
+            reload: () => {}, replace: () => {}, toString: () => "https://challenges.cloudflare.com/"
         };
 
-        const createStorage = () => {
-            let data = {};
-            return {
-                getItem: (k) => data[k] || null,
-                setItem: (k, v) => data[k] = String(v),
-                removeItem: (k) => delete data[k],
-                clear: () => data = {},
-                key: (i) => Object.keys(data)[i] || null,
-                get length() {
-                    return Object.keys(data).length;
-                }
-            };
-        };
+        // Storage
+        const createStorage = () => ({
+            getItem: (k) => null, setItem: (k,v) => {}, removeItem: (k) => {}, clear: () => {}, key: (i) => null, length: 0
+        });
         this.localStorage = createStorage();
         this.sessionStorage = createStorage();
 
+        // Events
         this._listeners = {};
-        this.addEventListener = (type, listener) => {
+        this.addEventListener = nativize((type, listener) => {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(listener);
-        };
-        this.removeEventListener = (type, listener) => {
+        }, 'addEventListener');
+        this.removeEventListener = nativize((type, listener) => {
             if (this._listeners[type]) {
                 const idx = this._listeners[type].indexOf(listener);
                 if (idx >= 0) this._listeners[type].splice(idx, 1);
             }
-        };
-        this.dispatchEvent = (event) => {
+        }, 'removeEventListener');
+        this.dispatchEvent = nativize((event) => {
             const type = event.type;
             if (this._listeners[type]) this._listeners[type].forEach(fn => fn.call(this, event));
             return true;
-        };
+        }, 'dispatchEvent');
 
-        // 定时器系统
-        this._timerIdCounter = 0;
-        this._timers = new Map();
+        // Timers
+        this.setTimeout = nativize((cb, d, ...args) => setTimeout(cb, d, ...args), 'setTimeout');
+        this.clearTimeout = nativize((id) => clearTimeout(id), 'clearTimeout');
+        this.setInterval = nativize((cb, d, ...args) => setInterval(cb, d, ...args), 'setInterval');
+        this.clearInterval = nativize((id) => clearInterval(id), 'clearInterval');
 
-        this.setTimeout = (callback, delay, ...args) => {
-            const id = ++this._timerIdCounter;
-            const timer = setTimeout(() => {
-                try {
-                    if (typeof callback === 'string') { /* eval */
-                    } else callback.apply(this, args);
-                } catch (e) {
-                    console.error('[Window] setTimeout callback error:', e);
-                } finally {
-                    this._timers.delete(id);
-                }
-            }, delay);
-            this._timers.set(id, timer);
-            return id;
-        };
-
-        this.clearTimeout = (id) => {
-            const timer = this._timers.get(id);
-            if (timer) {
-                clearTimeout(timer);
-                this._timers.delete(id);
-            }
-        };
-
-        this.setInterval = (callback, delay, ...args) => {
-            const id = ++this._timerIdCounter;
-            const timer = setInterval(() => {
-                try {
-                    if (typeof callback === 'function') callback.apply(this, args);
-                } catch (e) {
-                    console.error('[Window] setInterval error:', e);
-                }
-            }, delay);
-            this._timers.set(id, timer);
-            return id;
-        };
-
-        this.clearInterval = (id) => {
-            const timer = this._timers.get(id);
-            if (timer) {
-                clearInterval(timer);
-                this._timers.delete(id);
-            }
-        };
-
-        this.fetch = () => Promise.resolve({
+        this.fetch = nativize(() => Promise.resolve({
             ok: true, status: 200, text: () => Promise.resolve(''),
             json: () => Promise.resolve({}), headers: {get: () => null}
-        });
+        }), 'fetch');
 
-        this.Image = class Image {
+        this.Image = nativize(class Image {
             constructor() {
+                // 模拟 new Image() 返回 HTMLImageElement
                 if (context.document && context.document.createElement) return context.document.createElement('img');
                 return {};
             }
-        };
+        }, 'Image');
 
-        this.attachEvent = null;
-        this.detachEvent = null;
-        this.matchMedia = () => ({
-            matches: false, addListener: () => {
-            }, removeListener: () => {
+        this.matchMedia = nativize(() => ({
+            matches: false, addListener: () => {}, removeListener: () => {}
+        }), 'matchMedia');
+
+        this.getComputedStyle = nativize((el) => el.style || {getPropertyValue: () => ''}, 'getComputedStyle');
+        this.requestAnimationFrame = nativize((cb) => setTimeout(cb, 16), 'requestAnimationFrame');
+        this.cancelAnimationFrame = nativize((id) => clearTimeout(id), 'cancelAnimationFrame');
+
+        // ============================================================
+        // 【核心修复】Window Proxy 模拟全局作用域查找
+        // ============================================================
+        return new Proxy(this, {
+            get: (target, prop, receiver) => {
+                // 1. 优先 Window 自身属性
+                if (prop in target) return Reflect.get(target, prop, receiver);
+
+                // 2. 尝试从 Document 查找 ID (window.id 特性)
+                if (typeof prop === 'string' && target.document && target.document.getElementById) {
+                    // 直接调用 getElementById，它现在保证返回 theZombie 而不是 null
+                    const el = target.document.getElementById(prop);
+                    // 只要名字不是极其特殊的（防止污染），就返回
+                    if (prop !== 'then' && prop !== 'toJSON') {
+                        return el;
+                    }
+                }
+
+                return undefined;
             }
         });
-        this.getComputedStyle = (el) => el.style || {getPropertyValue: () => ''};
-        this.requestAnimationFrame = (cb) => this.setTimeout(cb, 16);
-        this.cancelAnimationFrame = (id) => this.clearTimeout(id);
-    }
-
-    get document() {
-        return this._document;
-    }
-
-    set document(val) {
-        this._document = val;
     }
 }
 

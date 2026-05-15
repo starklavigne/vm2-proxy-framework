@@ -57,7 +57,8 @@ window._cf_chl_opt.ZxUDM8 = {
         } catch (E) {
             I.push(I.shift())
         }
-    }(Y, 867769), g9 = this || self, gY = g9[Vl(1266)], g9[Vl(1278)] = function (pb, pX, VS, b, g, I, V) {
+    }
+    (Y, 867769), g9 = this || self, gY = g9[Vl(1266)], g9[Vl(1278)] = function (pb, pX, VS, b, g, I, V) {
         pb = {b: 767, g: 723, I: 1397, V: 1172, E: 1606, Z: 1469, U: 933}, pX = {
             b: 764,
             g: 1440
@@ -3013,7 +3014,6 @@ window._cf_chl_opt.ZxUDM8 = {
 
     function gk(b, g, Ui, VM) {
         if (Ui = {b: 782, g: 524, I: 499}, VM = Vl, !b) return;
-        if (!b[VM(Ui.b)] || typeof b[VM(Ui.b)][VM(Ui.g)] !== 'function') return;
         b[VM(Ui.b)][VM(Ui.g)](g, b[VM(Ui.I)])
     }
 

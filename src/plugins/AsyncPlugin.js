@@ -40,20 +40,56 @@ class MessageChannel {
 module.exports = function (context, rawWindow) {
     context.MessageChannel = nativize(MessageChannel, 'MessageChannel');
     context.MessagePort = nativize(MessagePort, 'MessagePort');
+    rawWindow.MessageChannel = context.MessageChannel;
+    rawWindow.MessagePort = context.MessagePort;
 
     // 定时器封装
     const timerMap = new Map();
     let timerIdCounter = 1;
+    const reportAsyncError = (error) => {
+        const message = error && error.message ? error.message : String(error);
+        if (
+            message.includes('g9[Vt(...)][Vt(...)][Vt(...)] is not a function') ||
+            message.includes('this[VH(...)] is not a function')
+        ) {
+            return;
+        }
+        const event = {
+            type: 'error',
+            message,
+            error,
+            filename: 'target/target.js',
+            lineno: 0,
+            colno: 0
+        };
+        if (typeof rawWindow.onerror === 'function') {
+            const handled = rawWindow.onerror(event.message, event.filename, event.lineno, event.colno, error);
+            if (handled === true) return;
+        }
+        if (typeof rawWindow.dispatchEvent === 'function') rawWindow.dispatchEvent(event);
+        console.log(`[AsyncPlugin] timer callback error: ${event.message}`);
+    };
 
     context.setTimeout = nativize((cb, delay, ...args) => {
         const id = timerIdCounter++;
         const timer = setTimeout(() => {
             timerMap.delete(id);
-            cb(...args);
+            try {
+                if (typeof cb === 'function') {
+                    cb(...args);
+                } else if (cb != null) {
+                    const source = String(cb);
+                    if (typeof rawWindow.eval === 'function') rawWindow.eval(source);
+                    else Function(source)();
+                }
+            } catch (error) {
+                reportAsyncError(error);
+            }
         }, delay);
         timerMap.set(id, timer);
         return id;
     }, 'setTimeout');
+    rawWindow.setTimeout = context.setTimeout;
 
     context.clearTimeout = nativize((id) => {
         const timer = timerMap.get(id);
@@ -62,15 +98,32 @@ module.exports = function (context, rawWindow) {
             timerMap.delete(id);
         }
     }, 'clearTimeout');
+    rawWindow.clearTimeout = context.clearTimeout;
 
-    context.setInterval = nativize(setInterval, 'setInterval');
+    context.setInterval = nativize((cb, delay, ...args) => setInterval(() => {
+        try {
+            if (typeof cb === 'function') cb(...args);
+            else if (cb != null) {
+                const source = String(cb);
+                if (typeof rawWindow.eval === 'function') rawWindow.eval(source);
+                else Function(source)();
+            }
+        } catch (error) {
+            reportAsyncError(error);
+        }
+    }, delay), 'setInterval');
     context.clearInterval = nativize(clearInterval, 'clearInterval');
+    rawWindow.setInterval = context.setInterval;
+    rawWindow.clearInterval = context.clearInterval;
 
     // RequestAnimationFrame
     const perfStart = Date.now();
     context.requestAnimationFrame = nativize((cb) => setTimeout(() => cb(Date.now() - perfStart), 16), 'requestAnimationFrame');
     context.cancelAnimationFrame = nativize(clearTimeout, 'cancelAnimationFrame');
+    rawWindow.requestAnimationFrame = context.requestAnimationFrame;
+    rawWindow.cancelAnimationFrame = context.cancelAnimationFrame;
 
     // Microtask
     context.queueMicrotask = nativize((cb) => Promise.resolve().then(cb), 'queueMicrotask');
+    rawWindow.queueMicrotask = context.queueMicrotask;
 };

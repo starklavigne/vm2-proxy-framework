@@ -32,13 +32,13 @@ const installStackGuard = (context, scriptUrl) => {
                 }
 
                 // --- 伪装规则 (Mapper) ---
-                // 将本地运行的 target.js 映射回云端 URL
-                // 这里的 'target.js' 需要根据你实际运行的文件名特征来匹配
+                // 将本地运行的 target_bak.js 映射回云端 URL
+                // 这里的 'target_bak.js' 需要根据你实际运行的文件名特征来匹配
                 let safeFileName = unsafeFileName;
-                if (unsafeFileName.includes('target.js') || unsafeFileName === 'EnterScript') {
+                if (unsafeFileName.includes('target_bak.js') || unsafeFileName === 'EnterScript') {
                     safeFileName = scriptUrl;
                 } else {
-                    // 对于其他不确定的文件，只要不是 target.js，一律视为 VM 内部代码，选择性隐藏或伪装
+                    // 对于其他不确定的文件，只要不是 target_bak.js，一律视为 VM 内部代码，选择性隐藏或伪装
                     // 简单策略：如果是 eval 代码，保留；否则过滤
                     if (!unsafeFileName.startsWith('http') && !unsafeFileName.startsWith('eval')) {
                        continue;

@@ -4,6 +4,8 @@ const EventTarget = require('../env/EventTarget');
 const {nativize, cookieJar} = require('../utils/tools');
 
 module.exports = function (context, rawWindow, profile) {
+    context.Headers = context.Headers || rawWindow.Headers;
+    context.FormData = context.FormData || rawWindow.FormData;
 
     // Fetch 模拟
     context.fetch = nativize(async (url, options = {}) => {
@@ -56,6 +58,7 @@ module.exports = function (context, rawWindow, profile) {
             throw e;
         }
     }, 'fetch');
+    rawWindow.fetch = context.fetch;
 
     // XHR 模拟
     context.XMLHttpRequest = nativize(class XMLHttpRequest extends EventTarget {
@@ -98,4 +101,9 @@ module.exports = function (context, rawWindow, profile) {
             return "";
         }
     }, 'XMLHttpRequest');
+    rawWindow.XMLHttpRequest = context.XMLHttpRequest;
+    rawWindow.Headers = context.Headers;
+    rawWindow.FormData = context.FormData;
+    if (context.Request) rawWindow.Request = context.Request;
+    if (context.Response) rawWindow.Response = context.Response;
 };

@@ -32,7 +32,7 @@ vm2-proxy-framework/
 │   └── runner/             # [执行层] VM2 沙箱封装
 │       └── VMRunner.js
 ├── target/                 # 存放目标混淆代码
-│   └── target.js
+│   └── target_bak.js
 ├── main.js                 # [组装层] 程序入口
 └── README.md               # 说明文档
 ```
@@ -54,7 +54,7 @@ npm install vm2
 
 ### 2. 准备目标代码
 
-将你需要分析的混淆代码（或测试代码）放入 target/target.js。
+将你需要分析的混淆代码（或测试代码）放入 target/target_bak.js。
 
 ### 3. 运行框架
 
@@ -67,7 +67,7 @@ node main.js
 
 ```text
 Plaintext
->>> 开始执行目标代码: .../target/target.js >>>
+>>> 开始执行目标代码: .../target/target_bak.js >>>
 
 [读] window.navigator -> [object Navigator]
 [读] window.navigator.userAgent -> Mozilla/5.0...

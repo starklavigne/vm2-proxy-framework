@@ -1,7 +1,7 @@
 const createStyleProxy = require('./CSSStyleDeclaration');
 const DOMTokenList = require('./DOMTokenList');
 const NamedNodeMap = require('./NamedNodeMap');
-const { nativize } = require('../utils/tools'); // 假设 tools 就在这里，如果路径不对请调整
+const { nativize } = require('../utils/tools');
 
 // 尝试加载集合类
 let HTMLCollection, NodeList;
@@ -15,7 +15,7 @@ try {
 }
 
 // ==========================================
-// 1. 辅助工具：像素解析与布局计算
+// 1. 辅助工具
 // ==========================================
 const parsePx = (val) => {
     if (!val) return 0;
@@ -25,16 +25,20 @@ const parsePx = (val) => {
 };
 
 // ==========================================
-// 2. 僵尸节点 (Zombie) - 防御最终防线
+// 2. 本地僵尸节点 (Zombie) - 必须同步加强
 // ==========================================
 class ZombieElement {
     constructor() {
         this.tagName = 'ZOMBIE';
         this.nodeType = 1;
         this.style = {};
-        this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false };
+        this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false, toggle:()=>{} };
+        this.id = '';
+        // 【核心修复】补全属性，防止访问 undefined.readyState 崩溃
+        this.readyState = 'complete';
+        this.src = '';
     }
-    insertBefore() { return null; }
+    insertBefore() { return this; }
     appendChild(child) { return child; }
     removeChild(child) { return child; }
     replaceChild(newChild) { return newChild; }
@@ -42,8 +46,14 @@ class ZombieElement {
     setAttribute() {}
     get children() { return []; }
     get childNodes() { return []; }
-    // 僵尸节点的尺寸永远是 0，防止逻辑穿透
+    // 链式调用保护
+    querySelector() { return this; }
+    querySelectorAll() { return []; }
+    getElementsByTagName() { return []; }
+    getElementById() { return this; }
+    // 尺寸保护
     getBoundingClientRect() { return { x:0, y:0, width:0, height:0, top:0, left:0, right:0, bottom:0 }; }
+    getClientRects() { return [{top:0, left:0, width:0, height:0}]; }
 }
 const theZombie = new ZombieElement();
 
@@ -76,6 +86,9 @@ class Element {
         this.detachEvent = undefined;
         this.fireEvent = undefined;
 
+        // 媒体/脚本通用属性补全
+        this.readyState = 'complete'; // 防止 Element被当作脚本/文档检测时崩溃
+
         // 特殊元素初始化
         if (this.tagName === 'IFRAME') this._setupIframe(context);
         if (this.tagName === 'FORM') {
@@ -83,18 +96,26 @@ class Element {
         }
     }
 
-    // --- 内部索引查找 ---
     _indexOf(node) {
         if (!node) return -1;
         return this._children.findIndex(c => c === node || (c._uid && node._uid && c._uid === node._uid));
     }
 
-    // --- Iframe 模拟 ---
+    // --- Iframe 模拟 (重点修复区域) ---
     _setupIframe(context) {
+        // 创建一个伪造的 Document 对象
         const iframeDoc = new Element('#DOCUMENT', context);
         iframeDoc.nodeType = 9;
         iframeDoc.tagName = null;
         iframeDoc._uid = 'doc_iframe_' + Date.now();
+
+        // 【核心修复】补全 Document 特有属性
+        iframeDoc.readyState = 'complete';
+        iframeDoc.domain = 'challenges.cloudflare.com';
+        iframeDoc.cookie = '';
+        // 关键：CF 可能会检查 currentScript
+        iframeDoc.currentScript = theZombie;
+        iframeDoc.scripts = [];
 
         const html = new Element('HTML', context);
         const head = new Element('HEAD', context);
@@ -112,10 +133,17 @@ class Element {
         iframeDoc.createElement = (tag) => {
              const el = new Element(tag, context);
              el.ownerDocument = iframeDoc;
+             if(tag.toUpperCase() === 'SCRIPT') iframeDoc.scripts.push(el);
              return el;
         };
-        iframeDoc.getElementById = () => null;
+        // 【核心修复】找不到时返回僵尸，而不是 null
+        iframeDoc.getElementById = (id) => theZombie;
+        iframeDoc.querySelector = (sel) => theZombie;
         iframeDoc.getElementsByTagName = (t) => new HTMLCollection([]);
+
+        iframeDoc.open = () => iframeDoc;
+        iframeDoc.close = () => {};
+        iframeDoc.write = () => {};
 
         this.contentWindow = new Proxy(context || {}, {
             get: (target, prop) => {
@@ -148,7 +176,6 @@ class Element {
     set innerHTML(val) {
         this._innerHTML = String(val);
         this._children = [];
-        // 简易的 A 标签解析，防止脚本仅仅为了检查链接而崩溃
         const str = String(val);
         if (str.includes('<a') || str.includes('<A')) {
             const hrefMatch = str.match(/href=["'](.*?)["']/i);
@@ -160,7 +187,7 @@ class Element {
 
     appendChild(child) {
         if (!child) return null;
-        if (child.nodeType === 11) { // Fragment
+        if (child.nodeType === 11) {
             const fragChildren = [...child._children];
             fragChildren.forEach(c => this.appendChild(c));
             child._children = [];
@@ -213,15 +240,16 @@ class Element {
     }
 
     // --- 查询与属性 ---
-    querySelector(selector) { return null; } // 由 HTMLNode.js 覆盖
-    getElementsByTagName(tagName) { return new HTMLCollection([]); } // 由 HTMLNode.js 覆盖
+    // 默认返回 Zombie，防止链式调用报错
+    querySelector(selector) { return theZombie; }
+    getElementsByTagName(tagName) { return new HTMLCollection([]); }
     getElementsByClassName(className) { return new HTMLCollection([]); }
+    getElementById(id) { return theZombie; }
 
     getAttribute(name) { return this._attributes[name] || this[name] || null; }
     setAttribute(name, value) {
         this._attributes[name] = String(value);
         if (name === 'id') this.id = value;
-        // 不允许直接覆盖关键属性
         if (!['href', 'src', 'style', 'tagName', 'nodeType'].includes(name)) {
             this[name] = value;
         }
@@ -232,110 +260,53 @@ class Element {
     get href() { return this._attributes['href'] || ''; }
     set href(val) { this._attributes['href'] = val; }
 
-
-    // ==========================================
-    // 【核心修复】布局引擎模拟 (Fake Layout Engine)
-    // ==========================================
-
-    // 内部方法：计算自身的尺寸和位置
+    // --- 布局引擎模拟 ---
     _computeLayout() {
-        // 1. 隐藏元素检查
         if (this.style.display === 'none' || this.style.visibility === 'hidden') {
             return { w: 0, h: 0, x: 0, y: 0 };
         }
-
-        // 2. 宽度计算 (Width)
         let w = parsePx(this.style.width);
         if (w === 0) {
-            // 如果没有显式设置宽度，根据类型给默认值
             const blockTags = ['DIV', 'P', 'FORM', 'BODY', 'HTML', 'H1', 'H2', 'HEADER', 'FOOTER'];
-            const screenW = 1920; // 假设屏幕宽
+            const screenW = 1920;
             if (this.tagName === 'BODY' || this.tagName === 'HTML') w = screenW;
-            else if (blockTags.includes(this.tagName)) w = screenW; // 块级元素占满
-            else w = 50; // 行内元素默认给一点宽度
+            else if (blockTags.includes(this.tagName)) w = screenW;
+            else w = 50;
         }
-
-        // 3. 高度计算 (Height)
         let h = parsePx(this.style.height);
         if (h === 0) {
             if (this.tagName === 'BODY' || this.tagName === 'HTML') h = 1080;
-            else h = 20; // 默认行高
+            else h = 20;
         }
-
-        // 4. 位置计算 (Position X, Y)
-        // 简易流式布局：Y 轴简单累加，防止所有元素都在 (0,0)
         let x = parsePx(this.style.left) || parsePx(this.style.marginLeft) || 0;
         let y = parsePx(this.style.top) || parsePx(this.style.marginTop) || 0;
-
-        // 如果在文档流中，且有父节点，累加父节点位置
         if (this.parentNode && this.parentNode !== theZombie) {
-            // 获取父节点的计算布局（递归可能会深，这里只取 DOM 树上的偏移）
-            // 为了性能和防止死循环，我们不递归调用父节点的 getBoundingClientRect
-            // 而是简单假设父节点位置为 0，或者基于 siblings 索引计算偏移
-
-            // 简易垂直堆叠逻辑：
-            // 如果我是父节点的第 N 个子元素，我的 Y 坐标大约是 N * 20
             const index = this.parentNode._indexOf(this);
-            if (index > 0) {
-                y += index * 20; // 模拟每个兄弟元素高 20px
-            }
+            if (index > 0) y += index * 20;
         }
-
         return { w, h, x, y };
     }
 
-    get offsetWidth() {
-        return this._computeLayout().w;
-    }
+    get offsetWidth() { return this._computeLayout().w; }
+    get offsetHeight() { return this._computeLayout().h; }
+    get clientWidth() { return this.offsetWidth; }
+    get clientHeight() { return this.offsetHeight; }
+    get offsetLeft() { return this._computeLayout().x; }
+    get offsetTop() { return this._computeLayout().y; }
 
-    get offsetHeight() {
-        return this._computeLayout().h;
-    }
-
-    get clientWidth() {
-        return this.offsetWidth; // 简化：不减去边框
-    }
-
-    get clientHeight() {
-        return this.offsetHeight;
-    }
-
-    get offsetLeft() {
-        return this._computeLayout().x;
-    }
-
-    get offsetTop() {
-        return this._computeLayout().y;
-    }
-
-    // 关键方法：被 CF 重点检测
     getBoundingClientRect() {
         const { w, h, x, y } = this._computeLayout();
-
-        // 注意：getBoundingClientRect 返回的是相对于 Viewport 的坐标
-        // 这里的 x, y 已经是简易计算后的模拟值
-        return {
-            x: x,
-            y: y,
-            left: x,
-            top: y,
-            right: x + w,
-            bottom: y + h,
-            width: w,
-            height: h
-        };
+        return { x, y, left: x, top: y, right: x + w, bottom: y + h, width: w, height: h };
     }
 
     getClientRects() {
         return [this.getBoundingClientRect()];
     }
 
-    // 交互方法桩
     focus() {}
     blur() {}
     click() {}
     toString() { return `[object ${this.constructor.name}]`; }
 }
 
-// 导出
 module.exports = Element;

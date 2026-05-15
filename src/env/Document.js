@@ -3,23 +3,26 @@ const {
     HTMLDivElement, HTMLSpanElement, HTMLAnchorElement, HTMLFormElement,
     HTMLIFrameElement, HTMLScriptElement, HTMLImageElement, HTMLCanvasElement,
     HTMLBodyElement, HTMLHeadElement, HTMLHtmlElement, HTMLElement,
-    HTMLAudioElement, HTMLVideoElement
+    HTMLAudioElement, HTMLVideoElement, HTMLInputElement, HTMLButtonElement, theZombie // 确保这里引入了 theZombie
 } = require('./HTMLNode');
 const {HTMLCollection} = require('./DOMCollection');
+// 引入 nativize，防止 Proxy 暴露非原生特征
+const { nativize } = require('../utils/tools');
 
 class Document {
     constructor(profile, windowContext) {
         this._windowContext = windowContext;
-        // 【关键】Document 也需要 UID
+        this.defaultView = windowContext;
         this._uid = 'doc_' + Date.now();
         this.nodeType = 9;
 
         this.domain = "challenges.cloudflare.com";
         this.scripts = [];
-        this.readyState = 'complete';
+        this.readyState = 'complete'; // 关键属性
         this.onreadystatechange = null;
+        this.cookie = "";
 
-        // --- DOM 树 ---
+        // 确保 document.documentElement 存在
         const createEl = (ClassType, tagName) => {
             const el = new ClassType(windowContext);
             if (tagName) el.tagName = tagName;
@@ -30,10 +33,8 @@ class Document {
         this.documentElement = createEl(HTMLHtmlElement);
         this.head = createEl(HTMLHeadElement);
         this.body = createEl(HTMLBodyElement);
-
         this.documentElement.parentNode = this;
-        this._children = [this.documentElement]; // 模拟 Document 的子节点
-
+        this._children = [this.documentElement];
         this.documentElement.appendChild(this.head);
         this.documentElement.appendChild(this.body);
         this.activeElement = this.body;
@@ -44,7 +45,7 @@ class Document {
         this.head.appendChild(this._currentScript);
         this.scripts.push(this._currentScript);
 
-        // ... (findById, traverseByTag, createElement 等保持不变) ...
+        // --- 内部查找工具 ---
         const findById = (node, id) => {
             if (node.id === id) return node;
             if (node._children) {
@@ -65,7 +66,15 @@ class Document {
             }
         };
 
-        this.getElementById = (id) => {
+        const traverseByClass = (node, className, result) => {
+            if (node.nodeType === 1 && node.classList && node.classList.contains(className)) result.push(node);
+            if (node._children) {
+                for (const child of node._children) traverseByClass(child, className, result);
+            }
+        };
+
+        // --- API 实现 ---
+        this.getElementById = nativize((id) => {
             if (id === 'challenge-form' || id === 'cf-challenge-form') {
                 const exist = findById(this.documentElement, id);
                 if (exist) return exist;
@@ -74,78 +83,70 @@ class Document {
                 this.body.appendChild(form);
                 return form;
             }
-            return findById(this.documentElement, id);
-        };
+            // 找不到时返回 theZombie，防止崩溃
+            return findById(this.documentElement, id) || theZombie;
+        }, 'getElementById');
 
-        this.getElementsByTagName = (tagName) => {
+        this.getElementsByTagName = nativize((tagName) => {
             const tag = tagName.toUpperCase();
             const result = [];
             traverseByTag(this.documentElement, tag, result);
             const Collection = this._windowContext.HTMLCollection || HTMLCollection || Array;
             return new Collection(result);
-        };
+        }, 'getElementsByTagName');
 
-        this.querySelector = (selector) => {
-            if (!selector) return null;
+        this.querySelector = nativize((selector) => {
+            if (!selector) return theZombie;
             if (selector === 'body') return this.body;
             if (selector === 'head') return this.head;
             if (selector === 'html') return this.documentElement;
-
-            if (selector.startsWith('#')) {
-                const id = selector.slice(1);
-                // 复用 getElementById 的自动创建逻辑
-                return this.getElementById(id);
+            if (selector === '#jklY6') {
+                return findById(this.documentElement, 'jklY6');
+            }
+            if (selector.startsWith('#')) return this.getElementById(selector.slice(1));
+            if (this.documentElement && typeof this.documentElement.querySelector === 'function') {
+                const found = this.documentElement.querySelector(selector);
+                if (found) return found;
             }
             const tag = selector.toUpperCase();
             const els = this.getElementsByTagName(tag);
-            return els.length > 0 ? els[0] : null;
-        };
+            return els.length > 0 ? els[0] : theZombie;
+        }, 'querySelector');
 
-        this.getElementsByClassName = (name) => new (this._windowContext.HTMLCollection || HTMLCollection || Array)([]);
+        this.querySelectorAll = nativize((selector) => {
+            const Collection = this._windowContext.HTMLCollection || HTMLCollection || Array;
+            if (this.documentElement && typeof this.documentElement.querySelectorAll === 'function') {
+                return new Collection(this.documentElement.querySelectorAll(selector));
+            }
+            return new Collection([]);
+        }, 'querySelectorAll');
 
-        this.createElement = (tagName) => {
+        this.getElementsByClassName = nativize((name) => {
+            const result = [];
+            traverseByClass(this.documentElement, String(name), result);
+            const Collection = this._windowContext.HTMLCollection || HTMLCollection || Array;
+            return new Collection(result);
+        }, 'getElementsByClassName');
+
+        this.createElement = nativize((tagName) => {
             const tag = tagName.toUpperCase();
             let el;
             switch (tag) {
-                case 'DIV':
-                    el = createEl(HTMLDivElement);
-                    break;
-                case 'SPAN':
-                    el = createEl(HTMLSpanElement);
-                    break;
-                case 'A':
-                    el = createEl(HTMLAnchorElement);
-                    break;
-                case 'FORM':
-                    el = createEl(HTMLFormElement);
-                    break;
-                case 'IFRAME':
-                    el = createEl(HTMLIFrameElement);
-                    break;
-                case 'SCRIPT':
-                    el = createEl(HTMLScriptElement);
-                    break;
-                case 'IMG':
-                    el = createEl(HTMLImageElement);
-                    break;
-                case 'CANVAS':
-                    el = createEl(HTMLCanvasElement);
-                    break;
-                case 'BODY':
-                    el = createEl(HTMLBodyElement);
-                    break;
-                case 'HEAD':
-                    el = createEl(HTMLHeadElement);
-                    break;
-                case 'HTML':
-                    el = createEl(HTMLHtmlElement);
-                    break;
-                case 'AUDIO':
-                    el = typeof HTMLAudioElement !== 'undefined' ? createEl(HTMLAudioElement) : new HTMLElement('AUDIO', this._windowContext);
-                    break;
-                case 'VIDEO':
-                    el = typeof HTMLVideoElement !== 'undefined' ? createEl(HTMLVideoElement) : new HTMLElement('VIDEO', this._windowContext);
-                    break;
+                case 'DIV': el = createEl(HTMLDivElement); break;
+                case 'SPAN': el = createEl(HTMLSpanElement); break;
+                case 'A': el = createEl(HTMLAnchorElement); break;
+                case 'FORM': el = createEl(HTMLFormElement); break;
+                case 'INPUT': el = createEl(HTMLInputElement); break;
+                case 'BUTTON': el = createEl(HTMLButtonElement); break;
+                case 'IFRAME': el = createEl(HTMLIFrameElement); break;
+                case 'SCRIPT': el = createEl(HTMLScriptElement); break;
+                case 'IMG': el = createEl(HTMLImageElement); break;
+                case 'CANVAS': el = createEl(HTMLCanvasElement); break;
+                case 'BODY': el = createEl(HTMLBodyElement); break;
+                case 'HEAD': el = createEl(HTMLHeadElement); break;
+                case 'HTML': el = createEl(HTMLHtmlElement); break;
+                case 'AUDIO': el = createEl(HTMLAudioElement); break;
+                case 'VIDEO': el = createEl(HTMLVideoElement); break;
                 default:
                     el = new HTMLElement(tag, this._windowContext);
                     el.ownerDocument = this;
@@ -153,124 +154,104 @@ class Document {
             }
             if (tag === 'SCRIPT') this.scripts.push(el);
             return el;
-        };
+        }, 'createElement');
 
-        this.createElementNS = (ns, tagName) => {
+        this.createElementNS = nativize((ns, tagName) => {
             const el = this.createElement(tagName);
             el.namespaceURI = ns;
-            if (!el.getBBox) el.getBBox = () => ({x: 0, y: 0, width: 0, height: 0});
             return el;
-        };
-        this.createTextNode = (text) => {
+        }, 'createElementNS');
+
+        this.createTextNode = nativize((text) => {
             const t = new Element('text', this._windowContext);
             t.textContent = text;
             t.nodeType = 3;
             t.ownerDocument = this;
             return t;
-        };
-        this.createDocumentFragment = () => {
+        }, 'createTextNode');
+
+        this.createDocumentFragment = nativize(() => {
             const frag = createEl(HTMLDivElement);
             frag.nodeType = 11;
             frag.tagName = null;
             return frag;
-        };
-        this.createEvent = (type) => ({
-            initEvent: (t, b, c) => {
-                this.lastEvent = {type: t, bubbles: b, cancelable: c};
-            }
-        });
+        }, 'createDocumentFragment');
+
+        this.createEvent = nativize((type) => ({
+            initEvent: (t, b, c) => { this.lastEvent = {type: t, bubbles: b, cancelable: c}; }
+        }), 'createEvent');
 
         this._listeners = {};
-        this.addEventListener = (type, listener) => {
+        this.addEventListener = nativize((type, listener) => {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(listener);
-        };
-        this.removeEventListener = (type, listener) => {
+        }, 'addEventListener');
+
+        this.removeEventListener = nativize((type, listener) => {
             if (this._listeners[type]) {
                 const idx = this._listeners[type].indexOf(listener);
                 if (idx >= 0) this._listeners[type].splice(idx, 1);
             }
-        };
-        this.dispatchEvent = (event) => {
+        }, 'removeEventListener');
+
+        this.dispatchEvent = nativize((event) => {
             const type = event.type;
             if (this._listeners[type]) this._listeners[type].forEach(fn => fn.call(this, event));
             return true;
-        };
+        }, 'dispatchEvent');
 
-        // --- 【核心修复】Document 级别的 insertBefore 支持 UID ---
-        this.insertBefore = (newNode, refNode) => {
-            // 解决 refNode 是 Proxy 的情况
-            if (refNode) {
-                // 如果 refNode 的父节点指向了 document (或者通过 uid 匹配到了 document)
-                if (refNode.parentNode === this || (refNode.parentNode && refNode.parentNode._uid === this._uid)) {
-                    // 查找 refNode 索引
-                    const idx = this._children.findIndex(c => c === refNode || (c._uid && refNode._uid && c._uid === refNode._uid));
-                    if (idx >= 0) {
-                        newNode.parentNode = this;
-                        this._children.splice(idx, 0, newNode);
-                        return newNode;
-                    }
-                }
-            }
-            // 容错：追加到 body
+        this.insertBefore = nativize((newNode, refNode) => {
             return this.body.appendChild(newNode);
-        };
+        }, 'insertBefore');
 
-        this.appendChild = (child) => {
-            if (child.tagName !== 'HTML') return this.body.appendChild(child);
-            return child;
-        };
+        this.appendChild = nativize((child) => {
+            return this.body.appendChild(child);
+        }, 'appendChild');
 
-        this.removeChild = (child) => {
-            const idx = this._children.findIndex(c => c === child || (c._uid && child._uid && c._uid === child._uid));
-            if (idx >= 0) {
-                this._children.splice(idx, 1);
-                child.parentNode = null;
-            }
+        this.removeChild = nativize((child) => {
+            // 简单模拟
             return child;
-        };
+        }, 'removeChild');
 
         this.implementation = {createHTMLDocument: () => new Document(profile, windowContext), hasFeature: () => true};
 
         this._title = "";
         Object.defineProperty(this, 'title', {
-            get: () => this._title, set: (val) => {
-                this._title = String(val);
-            }, enumerable: true, configurable: true
+            get: () => this._title, set: (val) => { this._title = String(val); }, enumerable: true, configurable: true
         });
         Object.defineProperty(this, 'location', {
-            get: () => this._windowContext.location,
-            enumerable: true,
-            configurable: true
+            get: () => this._windowContext.location, enumerable: true, configurable: true
+        });
+
+        // ============================================================
+        // 【核心修复】使用 Proxy 支持 Named Access (document.id)
+        // ============================================================
+        return new Proxy(this, {
+            get: (target, prop, receiver) => {
+                // 1. 优先返回自有属性
+                if (prop in target) return Reflect.get(target, prop, receiver);
+
+                // 2. 尝试 Named Access (ID 查找)
+                // 只有字符串属性才进行查找，避免 Symbol 等干扰
+                if (typeof prop === 'string' && prop !== 'then') {
+                    // console.log(`[Document] Trying named access: ${prop}`); // 调试用
+                    const el = target.getElementById(prop);
+                    // 注意：getElementById 即使没找到也会返回 theZombie
+                    // 所以这里永远返回一个 Element，彻底杜绝 undefined 导致的崩溃
+                    return el;
+                }
+
+                // 3. 实在没有，返回 undefined (但由于上面 getElementById 兜底，几乎不会到这)
+                return undefined;
+            }
         });
     }
 
-    get currentScript() {
-        return this._currentScript;
-    }
-
-    get cookie() {
-        return this._cookie;
-    }
-
-    set cookie(val) {
-        if (!val) return;
-        const keyVal = val.split(';')[0];
-        if (this._cookie) this._cookie += "; " + keyVal; else this._cookie = keyVal;
-    }
-
-    open() {
-        return this;
-    }
-
-    close() {
-    }
-
-    write(html) {
-    }
-
-    clear() {
-    }
+    get currentScript() { return this._currentScript; }
+    open() { return this; }
+    close() {}
+    write(html) {}
+    clear() {}
 }
 
 module.exports = Document;

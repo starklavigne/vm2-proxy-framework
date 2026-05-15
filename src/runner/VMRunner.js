@@ -20,7 +20,7 @@ class VMRunner {
         const bootstrapCode = `
             try {
                 const globalMounts = {
-                    Object, Array, Function, String, Number, Boolean, RegExp, Date, Math, JSON, Promise, Symbol, Proxy, Reflect,
+                    Object, Array, Function, String, Number, Boolean, BigInt, RegExp, Date, Math, JSON, Promise, Symbol, Proxy, Reflect,
                     Error, TypeError, EvalError, RangeError, ReferenceError, SyntaxError, URIError,
                     ArrayBuffer, Uint8Array, Int8Array, Uint16Array, Int16Array, Uint32Array, Int32Array, Float32Array, Float64Array, Uint8ClampedArray, DataView,
                     Map, Set, WeakMap, WeakSet,
@@ -29,16 +29,18 @@ class VMRunner {
                     TextEncoder: TextEncoder,
                     TextDecoder: TextDecoder,
                     
-                    console, parseInt, parseFloat, isNaN, isFinite, encodeURI, decodeURI, encodeURIComponent, decodeURIComponent, escape, unescape,
+                    console, eval, parseInt, parseFloat, isNaN, isFinite, encodeURI, decodeURI, encodeURIComponent, decodeURIComponent, escape, unescape,
                     atob: window.atob, btoa: window.btoa,
                     setTimeout: window.setTimeout, clearTimeout: window.clearTimeout, setInterval: window.setInterval, clearInterval: window.clearInterval,
                     requestAnimationFrame: window.requestAnimationFrame, cancelAnimationFrame: window.cancelAnimationFrame, queueMicrotask: window.queueMicrotask,
 
                     URL: window.URL, URLSearchParams: window.URLSearchParams, DOMParser: window.DOMParser, fetch: window.fetch,
                     Headers: window.Headers, Request: window.Request, Response: window.Response,
+                    Blob: window.Blob, FileReader: window.FileReader, ReadableStream: window.ReadableStream, Worker: window.Worker,
                     
                     Element: window.Element, HTMLElement: window.HTMLElement, Node: window.Node, Event: window.Event,
                     HTMLDivElement: window.HTMLDivElement, HTMLCanvasElement: window.HTMLCanvasElement, HTMLFormElement: window.HTMLFormElement,
+                    HTMLInputElement: window.HTMLInputElement, HTMLButtonElement: window.HTMLButtonElement,
                     HTMLAnchorElement: window.HTMLAnchorElement, HTMLImageElement: window.HTMLImageElement, HTMLScriptElement: window.HTMLScriptElement,
                     HTMLBodyElement: window.HTMLBodyElement, HTMLHeadElement: window.HTMLHeadElement, HTMLHtmlElement: window.HTMLHtmlElement,
                     HTMLIFrameElement: window.HTMLIFrameElement, HTMLSpanElement: window.HTMLSpanElement,
@@ -46,6 +48,7 @@ class VMRunner {
                     
                     HTMLCollection: window.HTMLCollection, NodeList: window.NodeList,
                     MutationObserver: window.MutationObserver, IntersectionObserver: window.IntersectionObserver, ResizeObserver: window.ResizeObserver,
+                    MessageChannel: window.MessageChannel, MessagePort: window.MessagePort,
                     
                     Image: window.Image, Audio: window.Audio, CSS: window.CSS,
                     
@@ -57,6 +60,20 @@ class VMRunner {
                 for (const [key, value] of Object.entries(globalMounts)) {
                     if (value && window[key] === undefined) window[key] = value;
                     if (value && self[key] === undefined) self[key] = value;
+                }
+
+                const nativeBind = Function.prototype.bind;
+                if (typeof nativeBind === 'function') {
+                    Object.defineProperty(Function.prototype, 'bind', {
+                        value: function (...args) {
+                            if (typeof this !== 'function') {
+                                return function () {};
+                            }
+                            return nativeBind.apply(this, args);
+                        },
+                        writable: false,
+                        configurable: false
+                    });
                 }
                 
                 window.Object.prototype.toString = Object.prototype.toString;
