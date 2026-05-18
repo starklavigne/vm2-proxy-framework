@@ -27,7 +27,7 @@ def run():
 
             # 停留 100 秒
             # 可以使用 time.sleep，也可以使用 page.wait_for_timeout(100000)
-            page.wait_for_timeout(300)
+            page.wait_for_timeout(600000)
 
             print("停留结束。")
 

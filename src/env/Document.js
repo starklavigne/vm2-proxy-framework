@@ -98,6 +98,7 @@ class Document {
             // 自动创建常见 CF 挑战页面容器
             const knownIds = ['challenge-form','cf-challenge-form','cf-challenge-body',
                 'cf-challenge-running','cf-chl-widget','ctp-checkbox','jklY6',
+                'sdsJu6','cuBkB7',
             ];
             if (id === 'challenge-form' || id === 'cf-challenge-form') {
                 const form = createEl(HTMLFormElement);

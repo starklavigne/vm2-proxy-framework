@@ -148,6 +148,49 @@ const createElementFromHTML = (html, context) => {
     return element;
 };
 
+const createLocationLike = (href = 'about:blank') => {
+    let current = String(href || 'about:blank');
+    const update = (value) => {
+        current = String(value || 'about:blank');
+        try {
+            const parsed = new URL(current, 'https://www.sciencedirect.com/');
+            location.href = parsed.href;
+            location.origin = parsed.origin;
+            location.protocol = parsed.protocol;
+            location.host = parsed.host;
+            location.hostname = parsed.hostname;
+            location.pathname = parsed.pathname;
+            location.search = parsed.search;
+            location.hash = parsed.hash;
+        } catch (_) {
+            location.href = current;
+            location.origin = 'null';
+            location.protocol = '';
+            location.host = '';
+            location.hostname = '';
+            location.pathname = current;
+            location.search = '';
+            location.hash = '';
+        }
+    };
+    const location = {
+        href: current,
+        origin: 'null',
+        protocol: '',
+        host: '',
+        hostname: '',
+        pathname: current,
+        search: '',
+        hash: '',
+        assign: (value) => update(value),
+        replace: (value) => update(value),
+        reload: () => {},
+        toString: () => location.href,
+    };
+    update(current);
+    return location;
+};
+
 // ==========================================
 // 3. 僵尸节点 (Zombie) - 终极防御
 // ==========================================
@@ -183,7 +226,7 @@ class ZombieElement {
     replaceChild(n) { return n; }
     getAttribute() { return null; }
     setAttribute() {}
-    querySelector() { return null; }
+    querySelector() { return this; }
     querySelectorAll() { return []; }
     getElementsByTagName() { return []; }
     get parentNode() { return this; }
@@ -242,6 +285,7 @@ class Element extends EventTarget {
         this.className = "";
         this.classList = createClassList(this);
         this.ownerDocument = context ? context.document : null;
+        this.shadowRoot = null;
     }
 
     get parentNode() { return this._parentNode || theZombie; }
@@ -260,39 +304,39 @@ class Element extends EventTarget {
 
     get children() { return this._children; }
     get childNodes() { return this._children; }
-    get firstChild() { return this._children[0] || null; }
-    get lastChild() { return this._children[this._children.length - 1] || null; }
-    get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : null; }
-    get firstElementChild() { return this._children.find((node) => node.nodeType === 1) || null; }
+    get firstChild() { return this._children[0] || theZombie; }
+    get lastChild() { return this._children[this._children.length - 1] || theZombie; }
+    get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : theZombie; }
+    get firstElementChild() { return this._children.find((node) => node.nodeType === 1) || theZombie; }
     get lastElementChild() {
         for (let i = this._children.length - 1; i >= 0; i--) {
             if (this._children[i].nodeType === 1) return this._children[i];
         }
-        return null;
+        return theZombie;
     }
 
     get nextSibling() {
-        if (!this._parentNode || this._parentNode === theZombie) return null;
+        if (!this._parentNode || this._parentNode === theZombie) return theZombie;
         const idx = this._parentNode._children.indexOf(this);
-        return this._parentNode._children[idx + 1] || null;
+        return this._parentNode._children[idx + 1] || theZombie;
     }
 
     get previousSibling() {
-        if (!this._parentNode || this._parentNode === theZombie) return null;
+        if (!this._parentNode || this._parentNode === theZombie) return theZombie;
         const idx = this._parentNode._children.indexOf(this);
-        return idx > 0 ? this._parentNode._children[idx - 1] : null;
+        return idx > 0 ? this._parentNode._children[idx - 1] : theZombie;
     }
 
     get nextElementSibling() {
         let node = this.nextSibling;
         while (node && node.nodeType !== 1) node = node.nextSibling;
-        return node || null;
+        return node || theZombie;
     }
 
     get previousElementSibling() {
         let node = this.previousSibling;
         while (node && node.nodeType !== 1) node = node.previousSibling;
-        return node || null;
+        return node || theZombie;
     }
 
     contains(otherNode) {
@@ -313,13 +357,7 @@ class Element extends EventTarget {
         child.parentNode = this;
         this._children.push(child);
         if (child.tagName === 'IFRAME' && this._context) {
-            if (!child.contentWindow || !child.contentWindow.eval) {
-                child.contentWindow = this._context;
-                child.contentDocument = this._context.document || null;
-            }
-            const frameIndex = Number(this._context.length || 0);
-            this._context[frameIndex] = child.contentWindow || {};
-            this._context.length = frameIndex + 1;
+            if (typeof child._registerFrame === 'function') child._registerFrame();
         }
         return child;
     }
@@ -387,15 +425,29 @@ class Element extends EventTarget {
     }
 
     querySelector(selector) {
-        if (!selector) return null;
+        if (!selector) return theZombie;
         const selectors = String(selector).split(',').map((part) => part.trim()).filter(Boolean);
         for (const sel of selectors) {
+            if (sel.startsWith('#') && !/[\s>+~]/.test(sel)) {
+                const id = sel.slice(1);
+                const byId = this.ownerDocument && this.ownerDocument.getElementById
+                    ? this.ownerDocument.getElementById(id)
+                    : null;
+                if (byId) {
+                    console.log(`[Element] querySelector('${selector}') → ${byId.tagName || 'node'}${byId.id ? '#' + byId.id : ''}`);
+                    return byId;
+                }
+            }
             const parts = sel.split(/\s+/);
             const last = parts[parts.length - 1];
             const found = walkElements(this, (node) => matchesSimpleSelector(node, last));
-            if (found) return found;
+            if (found) {
+                console.log(`[Element] querySelector('${selector}') → ${found.tagName || 'node'}${found.id ? '#' + found.id : ''}`);
+                return found;
+            }
         }
-        return selector === '#jklY6' ? null : theZombie;
+        console.log(`[Element] querySelector('${selector}') → Zombie`);
+        return theZombie;
     }
 
     querySelectorAll(selector) {
@@ -466,6 +518,16 @@ class Element extends EventTarget {
         return null;
     }
     getRootNode() { return this.ownerDocument || this; }
+    attachShadow(init = {}) {
+        const root = new Element('#shadow-root', this._context);
+        root.nodeType = 11;
+        root.tagName = null;
+        root.host = this;
+        root.mode = init && init.mode || 'open';
+        root.ownerDocument = this.ownerDocument;
+        this.shadowRoot = root;
+        return root;
+    }
     cloneNode(deep = false) {
         const cloned = new Element(this.tagName, this._context);
         Object.entries(this._attributes).forEach(([key, value]) => cloned.setAttribute(key, value));
@@ -479,8 +541,12 @@ class Element extends EventTarget {
         return value == null ? null : {name, value};
     }
 
-    getBoundingClientRect() { return {top:0, left:0, width:0, height:0, x:0, y:0}; }
-    getClientRects() { return [{top:0, left:0, width:0, height:0}]; }
+    getBoundingClientRect() {
+        const width = Number.parseFloat(this.style.width || this.getAttribute('width') || (this.tagName === 'IFRAME' ? 300 : 0)) || 0;
+        const height = Number.parseFloat(this.style.height || this.getAttribute('height') || (this.tagName === 'IFRAME' ? 65 : 0)) || 0;
+        return {top:0, left:0, right:width, bottom:height, width, height, x:0, y:0};
+    }
+    getClientRects() { return [this.getBoundingClientRect()]; }
 
     focus() {}
     blur() {}
@@ -491,7 +557,7 @@ class Element extends EventTarget {
  'removeAttribute', 'hasAttribute', 'getAttributeNode', 'getElementsByTagName', 'getElementsByClassName',
  'querySelector', 'querySelectorAll', 'contains', 'append', 'prepend', 'before', 'after',
  'insertAdjacentElement', 'insertAdjacentHTML', 'insertAdjacentText', 'matches', 'closest',
- 'getRootNode', 'cloneNode', 'scrollIntoView'].forEach(method => {
+	 'getRootNode', 'attachShadow', 'cloneNode', 'scrollIntoView'].forEach(method => {
     Element.prototype[method] = nativize(Element.prototype[method], method);
 });
 
@@ -531,9 +597,201 @@ class HTMLScriptElement extends HTMLElement {
 class HTMLIFrameElement extends HTMLElement {
     constructor(c) {
         super('IFRAME', c);
-        // 这里的 c 是 windowContext
-        this.contentWindow = c || {};
-        this.contentDocument = this.contentWindow.document || null;
+        this._parentWindow = c || {};
+        this._src = 'about:blank';
+        this._name = '';
+        this.contentWindow = null;
+        this.contentDocument = null;
+        this._initFrame();
+        this._registerFrame();
+    }
+
+    _registerFrame() {
+        const parentWindow = this._parentWindow;
+        if (!parentWindow || !this.contentWindow || this._frameRegistered) return;
+        const frameIndex = Number(parentWindow.length || 0);
+        parentWindow[frameIndex] = this.contentWindow;
+        parentWindow.length = frameIndex + 1;
+        if (this._name) parentWindow[this._name] = this.contentWindow;
+        this._frameRegistered = true;
+    }
+
+    _initFrame() {
+        const parentWindow = this._parentWindow || {};
+        const iframe = this;
+        const frameDoc = new Element('#document', parentWindow);
+        frameDoc.nodeType = 9;
+        frameDoc.tagName = null;
+        frameDoc.readyState = 'complete';
+        frameDoc.domain = 'challenges.cloudflare.com';
+        frameDoc.cookie = '';
+        frameDoc.defaultView = null;
+        frameDoc.ownerDocument = frameDoc;
+        frameDoc._children = [];
+        frameDoc._listeners = {};
+
+        const html = new HTMLHtmlElement(parentWindow);
+        const head = new HTMLHeadElement(parentWindow);
+        const body = new HTMLBodyElement(parentWindow);
+        html.ownerDocument = frameDoc;
+        head.ownerDocument = frameDoc;
+        body.ownerDocument = frameDoc;
+        frameDoc.documentElement = html;
+        frameDoc.head = head;
+        frameDoc.body = body;
+        frameDoc._children.push(html);
+        html.appendChild(head);
+        html.appendChild(body);
+        frameDoc.scripts = [];
+        frameDoc.currentScript = theZombie;
+
+        const findById = (node, id) => {
+            if (node && node.id === id) return node;
+            const children = node && node._children ? node._children : [];
+            for (const child of children) {
+                const found = findById(child, id);
+                if (found) return found;
+            }
+            return null;
+        };
+        frameDoc.createElement = nativize((tag) => {
+            const upper = String(tag || 'div').toUpperCase();
+            let el;
+            if (upper === 'IFRAME') el = new HTMLIFrameElement(parentWindow);
+            else if (upper === 'SCRIPT') el = new HTMLScriptElement(parentWindow);
+            else if (upper === 'INPUT') el = new HTMLInputElement(parentWindow);
+            else if (upper === 'BUTTON') el = new HTMLButtonElement(parentWindow);
+            else if (upper === 'A') el = new HTMLAnchorElement(parentWindow);
+            else if (upper === 'SPAN') el = new HTMLSpanElement(parentWindow);
+            else if (upper === 'FORM') el = new HTMLFormElement(parentWindow);
+            else el = new HTMLElement(upper, parentWindow);
+            el.ownerDocument = frameDoc;
+            if (upper === 'SCRIPT') frameDoc.scripts.push(el);
+            return el;
+        }, 'createElement');
+        frameDoc.createTextNode = nativize((text) => {
+            const node = new Element('text', parentWindow);
+            node.nodeType = 3;
+            node.textContent = String(text || '');
+            node.ownerDocument = frameDoc;
+            return node;
+        }, 'createTextNode');
+        frameDoc.createDocumentFragment = nativize(() => {
+            const frag = new Element('#document-fragment', parentWindow);
+            frag.nodeType = 11;
+            frag.tagName = null;
+            frag.ownerDocument = frameDoc;
+            return frag;
+        }, 'createDocumentFragment');
+        frameDoc.getElementById = nativize((id) => findById(frameDoc.documentElement, String(id)) || theZombie, 'getElementById');
+        frameDoc.querySelector = nativize((selector) => frameDoc.documentElement.querySelector(selector), 'querySelector');
+        frameDoc.querySelectorAll = nativize((selector) => frameDoc.documentElement.querySelectorAll(selector), 'querySelectorAll');
+        frameDoc.getElementsByTagName = nativize((tag) => frameDoc.documentElement.getElementsByTagName(tag), 'getElementsByTagName');
+        frameDoc.open = nativize(() => frameDoc, 'open');
+        frameDoc.close = nativize(() => {}, 'close');
+        frameDoc.write = nativize((htmlText) => { frameDoc.body.innerHTML = String(htmlText || ''); }, 'write');
+        frameDoc.addEventListener = nativize((type, cb) => EventTarget.prototype.addEventListener.call(frameDoc, type, cb), 'addEventListener');
+        frameDoc.removeEventListener = nativize((type, cb) => EventTarget.prototype.removeEventListener.call(frameDoc, type, cb), 'removeEventListener');
+        frameDoc.dispatchEvent = nativize((evt) => EventTarget.prototype.dispatchEvent.call(frameDoc, evt), 'dispatchEvent');
+
+        const location = createLocationLike(this._src);
+        const frameWindow = {
+            window: null,
+            self: null,
+            globalThis: null,
+            top: parentWindow.top || parentWindow,
+            parent: parentWindow,
+            frames: null,
+            length: 0,
+            frameElement: iframe,
+            document: frameDoc,
+            location,
+            navigator: parentWindow.navigator || {},
+            performance: parentWindow.performance || {now: () => Date.now()},
+            console: parentWindow.console || console,
+            name: this._name,
+            closed: false,
+            origin: location.origin,
+            onmessage: null,
+            onload: null,
+            _listeners: {},
+        };
+        frameWindow.window = frameWindow.self = frameWindow.globalThis = frameWindow.frames = frameWindow;
+        frameWindow.eval = nativize((source) => {
+            if (parentWindow && typeof parentWindow.eval === 'function') return parentWindow.eval(String(source));
+            return Function(String(source))();
+        }, 'eval');
+        frameWindow.Function = parentWindow.Function || Function;
+        frameDoc.defaultView = frameWindow;
+        for (const key of [
+            'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame',
+            'MessageChannel', 'MessagePort', 'URL', 'URLSearchParams', 'Blob', 'FileReader', 'XMLHttpRequest',
+            'fetch', 'Headers', 'FormData', 'Event', 'MessageEvent', 'CustomEvent'
+        ]) {
+            if (parentWindow[key]) frameWindow[key] = parentWindow[key];
+        }
+        frameWindow.addEventListener = nativize((type, cb) => EventTarget.prototype.addEventListener.call(frameWindow, type, cb), 'addEventListener');
+        frameWindow.removeEventListener = nativize((type, cb) => EventTarget.prototype.removeEventListener.call(frameWindow, type, cb), 'removeEventListener');
+        frameWindow.dispatchEvent = nativize((evt) => EventTarget.prototype.dispatchEvent.call(frameWindow, evt), 'dispatchEvent');
+        frameWindow.postMessage = nativize((data, targetOrigin = '*', transfer = []) => {
+            setTimeout(() => {
+                const evt = {
+                    type: 'message',
+                    data,
+                    origin: parentWindow.location && parentWindow.location.origin || 'https://www.sciencedirect.com',
+                    source: parentWindow,
+                    ports: Array.isArray(transfer) ? transfer : [],
+                };
+                frameWindow.dispatchEvent(evt);
+            }, 0);
+        }, 'postMessage');
+        frameWindow.parent.postMessage = frameWindow.parent.postMessage || nativize((data, targetOrigin = '*', transfer = []) => {
+            setTimeout(() => {
+                const evt = {
+                    type: 'message',
+                    data,
+                    origin: location.origin,
+                    source: frameWindow,
+                    ports: Array.isArray(transfer) ? transfer : [],
+                };
+                if (typeof parentWindow.dispatchEvent === 'function') parentWindow.dispatchEvent(evt);
+                if (typeof parentWindow.onmessage === 'function') parentWindow.onmessage(evt);
+            }, 0);
+        }, 'postMessage');
+
+        this.contentWindow = frameWindow;
+        this.contentDocument = frameDoc;
+    }
+
+    get src() { return this._src; }
+    set src(value) {
+        this._src = String(value || '');
+        this._attributes.src = this._src;
+        if (this.contentWindow && this.contentWindow.location) this.contentWindow.location.replace(this._src || 'about:blank');
+        setTimeout(() => {
+            const event = {type: 'load', target: this};
+            this.dispatchEvent(event);
+            if (typeof this.onload === 'function') this.onload(event);
+        }, 0);
+    }
+    get name() { return this._name; }
+    set name(value) {
+        this._name = String(value || '');
+        this._attributes.name = this._name;
+        if (this.contentWindow) this.contentWindow.name = this._name;
+        if (this._parentWindow && this._name) this._parentWindow[this._name] = this.contentWindow;
+    }
+    setAttribute(name, value) {
+        name = String(name);
+        if (name === 'src') {
+            this.src = value;
+            return;
+        }
+        if (name === 'name') {
+            this.name = value;
+            return;
+        }
+        super.setAttribute(name, value);
     }
 }
 
