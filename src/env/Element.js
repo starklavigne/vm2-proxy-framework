@@ -34,12 +34,14 @@ class ZombieElement {
         this.style = {};
         this.classList = { add:()=>{}, remove:()=>{}, contains:()=>false, toggle:()=>{} };
         this.id = '';
-        // 【核心修复】补全属性，防止访问 undefined.readyState 崩溃
         this.readyState = 'complete';
         this.src = '';
     }
     insertBefore() { return this; }
-    appendChild(child) { return child; }
+    appendChild(child) {
+        console.log(`[Zombie] appendChild(${child && child.tagName || 'null'})`);
+        return child;
+    }
     removeChild(child) { return child; }
     replaceChild(newChild) { return newChild; }
     getAttribute() { return null; }

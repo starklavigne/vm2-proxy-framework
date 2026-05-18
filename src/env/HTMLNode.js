@@ -1,4 +1,5 @@
 const Crypto = require('./Crypto');
+const EventTarget = require('./EventTarget');
 
 // ==========================================
 // 1. 原生伪装工具
@@ -166,8 +167,16 @@ class ZombieElement {
         this._children = [];
         this.id = '';
         this.name = '';
+        this.innerHTML = '';
+        this.outerHTML = '';
+        this.textContent = '';
+        this.value = '';
+        this._listeners = {};
     }
 
+    addEventListener() {}
+    removeEventListener() {}
+    dispatchEvent() { return true; }
     insertBefore() { return this; }
     appendChild(child) { return child; }
     removeChild(child) { return child; }
@@ -192,13 +201,32 @@ class ZombieElement {
     pause() {}
 }
 
-const theZombie = new ZombieElement();
+const zombieNoop = function () { return zombieNoop; };
+Object.defineProperty(zombieNoop, 'toString', {
+    value: () => '',
+    writable: true,
+    configurable: true,
+    enumerable: false
+});
+const theZombie = new Proxy(new ZombieElement(), {
+    get(target, prop, receiver) {
+        if (prop in target || typeof prop === 'symbol') {
+            return Reflect.get(target, prop, receiver);
+        }
+        return zombieNoop;
+    },
+    set(target, prop, value) {
+        target[prop] = value;
+        return true;
+    }
+});
 
 // ==========================================
 // 4. Element 基类
 // ==========================================
-class Element {
+class Element extends EventTarget {
     constructor(tagName = 'DIV', context = null) {
+        super();
         this.tagName = (tagName || 'DIV').toUpperCase();
 
         Object.defineProperties(this, {
@@ -376,6 +404,81 @@ class Element {
         return collectElements(this, (node) => selectors.some((sel) => matchesSimpleSelector(node, sel.split(/\s+/).pop())));
     }
 
+    append(...nodes) {
+        nodes.forEach((node) => {
+            if (typeof node === 'string') node = createElementFromHTML(node, this._context) || node;
+            if (node && typeof node !== 'string') this.appendChild(node);
+        });
+    }
+
+    prepend(...nodes) {
+        nodes.reverse().forEach((node) => {
+            if (typeof node === 'string') node = createElementFromHTML(node, this._context) || node;
+            if (node && typeof node !== 'string') this.insertBefore(node, this.firstChild);
+        });
+    }
+
+    before(...nodes) {
+        if (!this.parentNode || this.parentNode === theZombie) return;
+        nodes.forEach((node) => {
+            if (typeof node === 'string') node = createElementFromHTML(node, this._context) || node;
+            if (node && typeof node !== 'string') this.parentNode.insertBefore(node, this);
+        });
+    }
+
+    after(...nodes) {
+        if (!this.parentNode || this.parentNode === theZombie) return;
+        const ref = this.nextSibling;
+        nodes.forEach((node) => {
+            if (typeof node === 'string') node = createElementFromHTML(node, this._context) || node;
+            if (node && typeof node !== 'string') this.parentNode.insertBefore(node, ref);
+        });
+    }
+
+    insertAdjacentElement(position, element) {
+        const pos = String(position || '').toLowerCase();
+        if (pos === 'beforebegin') return this.before(element), element;
+        if (pos === 'afterbegin') return this.insertBefore(element, this.firstChild), element;
+        if (pos === 'beforeend') return this.appendChild(element);
+        if (pos === 'afterend') return this.after(element), element;
+        return element;
+    }
+
+    insertAdjacentHTML(position, html) {
+        const element = createElementFromHTML(String(html || ''), this._context);
+        if (element) this.insertAdjacentElement(position, element);
+    }
+
+    insertAdjacentText(position, text) {
+        const node = this.ownerDocument && this.ownerDocument.createTextNode
+            ? this.ownerDocument.createTextNode(String(text))
+            : createElementFromHTML(`<span>${String(text)}</span>`, this._context);
+        if (node) this.insertAdjacentElement(position, node);
+    }
+
+    matches(selector) { return matchesSimpleSelector(this, selector); }
+    closest(selector) {
+        let node = this;
+        while (node && node !== theZombie) {
+            if (node.matches && node.matches(selector)) return node;
+            node = node.parentNode;
+        }
+        return null;
+    }
+    getRootNode() { return this.ownerDocument || this; }
+    cloneNode(deep = false) {
+        const cloned = new Element(this.tagName, this._context);
+        Object.entries(this._attributes).forEach(([key, value]) => cloned.setAttribute(key, value));
+        cloned.textContent = this.textContent || '';
+        if (deep) this._children.forEach((child) => cloned.appendChild(child.cloneNode ? child.cloneNode(true) : child));
+        return cloned;
+    }
+    scrollIntoView() {}
+    getAttributeNode(name) {
+        const value = this.getAttribute(name);
+        return value == null ? null : {name, value};
+    }
+
     getBoundingClientRect() { return {top:0, left:0, width:0, height:0, x:0, y:0}; }
     getClientRects() { return [{top:0, left:0, width:0, height:0}]; }
 
@@ -384,7 +487,11 @@ class Element {
     click() {}
 }
 
-['appendChild', 'removeChild', 'remove', 'insertBefore', 'replaceChild', 'getAttribute', 'setAttribute', 'getElementsByTagName', 'getElementsByClassName', 'querySelector', 'querySelectorAll', 'contains'].forEach(method => {
+['appendChild', 'removeChild', 'remove', 'insertBefore', 'replaceChild', 'getAttribute', 'setAttribute',
+ 'removeAttribute', 'hasAttribute', 'getAttributeNode', 'getElementsByTagName', 'getElementsByClassName',
+ 'querySelector', 'querySelectorAll', 'contains', 'append', 'prepend', 'before', 'after',
+ 'insertAdjacentElement', 'insertAdjacentHTML', 'insertAdjacentText', 'matches', 'closest',
+ 'getRootNode', 'cloneNode', 'scrollIntoView'].forEach(method => {
     Element.prototype[method] = nativize(Element.prototype[method], method);
 });
 

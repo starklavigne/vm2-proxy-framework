@@ -5,7 +5,28 @@ class ProxyFactory {
         this.noopMethods = new Set([
             'appendChild', 'insertBefore', 'removeChild', 'replaceChild', 'remove',
             'addEventListener', 'removeEventListener', 'dispatchEvent',
-            'focus', 'blur', 'click'
+            'focus', 'blur', 'click', 'querySelector', 'querySelectorAll'
+        ]);
+        this.unboundWindowFunctions = new Set([
+            'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp',
+            'Date', 'Promise', 'Symbol', 'Proxy', 'WeakMap', 'WeakSet', 'Map', 'Set',
+            'DataView', 'ArrayBuffer', 'Uint8Array', 'Int8Array', 'Uint16Array',
+            'Int16Array', 'Uint32Array', 'Int32Array', 'Float32Array', 'Float64Array',
+            'Uint8ClampedArray', 'Error', 'TypeError', 'EvalError', 'RangeError',
+            'ReferenceError', 'SyntaxError', 'URIError', 'TextEncoder', 'TextDecoder',
+            'URL', 'URLSearchParams', 'Blob', 'FileReader', 'Worker', 'Event',
+            'MouseEvent', 'KeyboardEvent', 'CustomEvent', 'DOMException',
+            'MutationObserver', 'AbortSignal', 'AbortController', 'Storage',
+            'Document', 'Window', 'EventTarget', 'Node', 'Element', 'HTMLElement',
+            'HTMLCollection', 'NodeList', 'DOMCollection', 'HTMLDivElement',
+            'HTMLCanvasElement', 'HTMLFormElement', 'HTMLInputElement',
+            'HTMLButtonElement', 'HTMLAnchorElement', 'HTMLImageElement',
+            'HTMLScriptElement', 'HTMLBodyElement', 'HTMLHeadElement',
+            'HTMLHtmlElement', 'HTMLIFrameElement', 'HTMLSpanElement',
+            'HTMLAudioElement', 'HTMLVideoElement', 'DOMParser', 'Request',
+            'Response', 'Audio', 'AudioContext', 'OfflineAudioContext',
+            'webkitAudioContext', 'webkitOfflineAudioContext', 'RTCPeerConnection',
+            'RTCSessionDescription', 'RTCIceCandidate', 'webkitRTCPeerConnection'
         ]);
     }
 
@@ -28,13 +49,32 @@ class ProxyFactory {
                 }
 
                 const value = Reflect.get(target, prop, receiver);
+                if (prop === 'XHwg6' && value && (typeof value === 'object' || typeof value === 'function')) {
+                    if (typeof value.querySelector !== 'function') {
+                        value.querySelector = function () { return null; };
+                    }
+                    if (typeof value.querySelectorAll !== 'function') {
+                        value.querySelectorAll = function () { return []; };
+                    }
+                    return value;
+                }
+                if ((prop === 'querySelector' || prop === 'querySelectorAll') && typeof value !== 'function') {
+                    return function () {
+                        return prop === 'querySelector' ? null : [];
+                    };
+                }
                 if (value === undefined && this.noopMethods.has(prop)) {
                     return function () {
+                        if (prop === 'querySelector') return null;
+                        if (prop === 'querySelectorAll') return [];
                         return arguments[0] || null;
                     };
                 }
 
                 if (typeof value === 'function') {
+                    if (name === 'window' && this.unboundWindowFunctions.has(prop)) {
+                        return value;
+                    }
                     const bound = value.bind(target);
                     if (/native code/.test(value.toString())) {
                         Object.defineProperty(bound, 'toString', {
@@ -59,6 +99,14 @@ class ProxyFactory {
                 return value;
             },
             set: (target, prop, value, receiver) => {
+                if (prop === 'XHwg6' && value && (typeof value === 'object' || typeof value === 'function')) {
+                    if (typeof value.querySelector !== 'function') {
+                        value.querySelector = function () { return null; };
+                    }
+                    if (typeof value.querySelectorAll !== 'function') {
+                        value.querySelectorAll = function () { return []; };
+                    }
+                }
                 if (this.enableLog) {
                     console.log(`[写] ${name}.${String(prop)} = ${String(value).substring(0, 50)}`);
                 }

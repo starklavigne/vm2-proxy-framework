@@ -2,6 +2,7 @@
 // Main Entry - VM2 Proxy Framework
 // =============================================================================
 const path = require('path');
+const fs = require('fs');
 const {URL} = require('url');
 const {TextEncoder, TextDecoder} = require('util');
 
@@ -12,7 +13,23 @@ const profile = require('./src/config/browserProfile');
 const cfConfig = require('./src/config/cfConfig'); // 独立的 CF 配置
 
 // Utils
-const {nativize} = require('./src/utils/tools');
+const {nativize, cookieJar} = require('./src/utils/tools');
+
+const importCookieFile = () => {
+    const cookiePath = path.join(__dirname, 'src/config/cfCookies.json');
+    if (!fs.existsSync(cookiePath)) return;
+    try {
+        const cookies = JSON.parse(fs.readFileSync(cookiePath, 'utf8'));
+        if (!Array.isArray(cookies)) return;
+        for (const cookie of cookies) {
+            if (cookie && cookie.name) cookieJar.cookies.set(cookie.name, cookie.value || '');
+        }
+        console.log(`[Cookie] 已导入 ${cookies.length} 个浏览器 cookie: ${cookies.map(c => c.name).join(', ')}`);
+    } catch (e) {
+        console.log(`[Cookie] 导入浏览器 cookie 失败: ${e.message}`);
+    }
+};
+importCookieFile();
 
 // Plugins (Features)
 const useAsyncPlugin = require('./src/plugins/AsyncPlugin');
@@ -23,6 +40,8 @@ const useNetworkPlugin = require('./src/plugins/NetworkPlugin');
 const Crypto = require('./src/env/Crypto');
 const EventTarget = require('./src/env/EventTarget');
 const Media = require('./src/env/Media');
+const AudioEnv = require('./src/env/AudioContext');
+const WebRTC = require('./src/env/WebRTC');
 const Window = require('./src/env/Window');
 const Document = require('./src/env/Document');
 const HTMLNodes = require('./src/env/HTMLNode');
@@ -50,6 +69,18 @@ const proxyFactory = new ProxyFactory({enableLog: true});
 
 // 基础环境注入
 context.console = console;
+[
+    'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp',
+    'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy', 'WeakMap',
+    'WeakSet', 'Map', 'Set', 'DataView', 'ArrayBuffer', 'Uint8Array',
+    'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array',
+    'Float32Array', 'Float64Array', 'Uint8ClampedArray', 'Error', 'TypeError',
+    'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError',
+    'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI',
+    'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape'
+].forEach((key) => {
+    context[key] = globalThis[key];
+});
 context.TextEncoder = TextEncoder;
 context.TextDecoder = TextDecoder;
 const vmTimeOrigin = Number(cfConfig.cITimeS || Math.floor(Date.now() / 1000)) * 1000;
@@ -209,6 +240,87 @@ context.Storage = nativize(class Storage {
     }
 }, 'Storage');
 context.CSSStyleDeclaration = nativize(require('./src/env/CSSStyleDeclaration'), 'CSSStyleDeclaration');
+context.Node = nativize(class Node extends EventTarget {
+    constructor() {
+        super();
+        this.parentNode = null;
+        this.childNodes = [];
+    }
+    appendChild(node) {
+        if (node) {
+            node.parentNode = this;
+            this.childNodes.push(node);
+        }
+        return node;
+    }
+    removeChild(node) {
+        const idx = this.childNodes.indexOf(node);
+        if (idx >= 0) this.childNodes.splice(idx, 1);
+        if (node) node.parentNode = null;
+        return node;
+    }
+    contains(node) {
+        return node === this || this.childNodes.some(child => child === node || (child.contains && child.contains(node)));
+    }
+}, 'Node');
+Object.assign(context.Node, {
+    ELEMENT_NODE: 1,
+    ATTRIBUTE_NODE: 2,
+    TEXT_NODE: 3,
+    DOCUMENT_NODE: 9,
+    DOCUMENT_FRAGMENT_NODE: 11
+});
+context.DOMParser = nativize(class DOMParser {
+    parseFromString(markup = '', type = 'text/html') {
+        const doc = new Document(profile, rawWindow);
+        doc.contentType = String(type || 'text/html');
+        doc.body.innerHTML = String(markup || '');
+        return doc;
+    }
+}, 'DOMParser');
+context.Request = nativize(class Request {
+    constructor(input, init = {}) {
+        this.url = String(input && input.url ? input.url : input || '');
+        this.method = String(init.method || (input && input.method) || 'GET').toUpperCase();
+        this.headers = new context.Headers(init.headers || (input && input.headers) || {});
+        this.body = init.body || null;
+        this.credentials = init.credentials || 'same-origin';
+        this.mode = init.mode || 'cors';
+        this.redirect = init.redirect || 'follow';
+    }
+    clone() { return new context.Request(this, {headers: this.headers, body: this.body}); }
+}, 'Request');
+context.Response = nativize(class Response {
+    constructor(body = '', init = {}) {
+        this._body = body == null ? '' : body;
+        this.status = init.status || 200;
+        this.statusText = init.statusText || 'OK';
+        this.ok = this.status >= 200 && this.status < 300;
+        this.headers = new context.Headers(init.headers || {});
+        this.url = init.url || '';
+        this.redirected = false;
+        this.type = 'basic';
+    }
+    text() { return Promise.resolve(String(this._body)); }
+    json() { return this.text().then(text => text ? JSON.parse(text) : {}); }
+    arrayBuffer() { return Promise.resolve(Buffer.from(String(this._body)).buffer); }
+    blob() { return Promise.resolve(new context.Blob([String(this._body)])); }
+    clone() { return new context.Response(this._body, {status: this.status, statusText: this.statusText, headers: this.headers, url: this.url}); }
+}, 'Response');
+context.Audio = nativize(function Audio(src = '') {
+    const audio = new HTMLNodes.HTMLAudioElement(rawWindow);
+    audio.src = String(src || '');
+    audio.ownerDocument = rawWindow.document || null;
+    return audio;
+}, 'Audio');
+context.AudioContext = nativize(AudioEnv.AudioContext, 'AudioContext');
+context.OfflineAudioContext = nativize(AudioEnv.OfflineAudioContext, 'OfflineAudioContext');
+context.webkitAudioContext = context.AudioContext;
+context.webkitOfflineAudioContext = context.OfflineAudioContext;
+context.RTCPeerConnection = nativize(WebRTC.RTCPeerConnection, 'RTCPeerConnection');
+context.RTCSessionDescription = nativize(WebRTC.RTCSessionDescription, 'RTCSessionDescription');
+context.RTCIceCandidate = nativize(WebRTC.RTCIceCandidate, 'RTCIceCandidate');
+context.webkitRTCPeerConnection = context.RTCPeerConnection;
 
 // =============================================================================
 // 2. DOM/BOM Initialization
@@ -224,6 +336,18 @@ rawWindow.crypto = new Crypto();
 rawWindow.localStorage = new context.Storage();
 rawWindow.sessionStorage = new context.Storage();
 rawWindow.console = console;
+[
+    'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp',
+    'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy', 'WeakMap',
+    'WeakSet', 'Map', 'Set', 'DataView', 'ArrayBuffer', 'Uint8Array',
+    'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array',
+    'Float32Array', 'Float64Array', 'Uint8ClampedArray', 'Error', 'TypeError',
+    'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'URIError',
+    'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'encodeURI', 'decodeURI',
+    'encodeURIComponent', 'decodeURIComponent', 'escape', 'unescape'
+].forEach((key) => {
+    rawWindow[key] = context[key];
+});
 rawWindow.eval = nativize((source) => runner.vm.run(String(source)), 'eval');
 rawWindow.Function = Function;
 rawWindow.TextEncoder = TextEncoder;
@@ -247,6 +371,19 @@ rawWindow.MutationObserver = context.MutationObserver;
 rawWindow.AbortSignal = context.AbortSignal;
 rawWindow.AbortController = context.AbortController;
 rawWindow.CSS = context.CSS;
+rawWindow.Node = context.Node;
+rawWindow.DOMParser = context.DOMParser;
+rawWindow.Request = context.Request;
+rawWindow.Response = context.Response;
+rawWindow.Audio = context.Audio;
+rawWindow.AudioContext = context.AudioContext;
+rawWindow.OfflineAudioContext = context.OfflineAudioContext;
+rawWindow.webkitAudioContext = context.webkitAudioContext;
+rawWindow.webkitOfflineAudioContext = context.webkitOfflineAudioContext;
+rawWindow.RTCPeerConnection = context.RTCPeerConnection;
+rawWindow.RTCSessionDescription = context.RTCSessionDescription;
+rawWindow.RTCIceCandidate = context.RTCIceCandidate;
+rawWindow.webkitRTCPeerConnection = context.webkitRTCPeerConnection;
 rawWindow.isSecureContext = true;
 
 const rawDocument = new Document(profile, rawWindow);
@@ -262,6 +399,7 @@ for (const key in libDoc) {
 // 关键 DOM 修复
 rawDocument.createElement = nativize((tag) => {
     const tagName = tag.toUpperCase();
+    if (tagName !== 'SCRIPT') console.log(`[DOM] createElement('${tag}')`);
     const clsName = `HTML${tagName.charAt(0).toUpperCase() + tagName.slice(1).toLowerCase()}Element`;
     if (context[clsName]) return new context[clsName](rawWindow);
     return new context.HTMLElement(tagName, rawWindow);
@@ -283,8 +421,13 @@ Object.defineProperty(rawDocument, 'currentScript', {
 
 rawWindow.document = rawDocument;
 
-// Location 设置
-const targetUrl = "https://www.sciencedirect.com/journal/phytochemistry-letters/issues?__cf_chl_tk=.OsjsaDOkWliTeNQOf7nokkouVLo2hfCBAImALUHHVg-1754468250-1.0.1.1-zwYm2xWq.YoRBK5Xk67cv.lC6IrWV9iFRgOBZ4q4mmw";
+// Location 设置 — 从 cfConfig 动态构建 targetUrl，避免硬编码过期 token
+const zone = String(cfConfig.cZone || '')
+    .replace(/^https?:\/\//, '')
+    .replace(/\/$/, '');
+const targetUrl = cfConfig.cUPMDTk
+    ? `https://${zone}${cfConfig.cUPMDTk}`
+    : `https://${zone}/`;
 const urlObj = new URL(targetUrl);
 rawWindow.location = {
     href: targetUrl, protocol: urlObj.protocol, host: urlObj.host, hostname: urlObj.hostname,
@@ -311,10 +454,13 @@ useNetworkPlugin(context, rawWindow, profile);
     'navigator', 'clientInformation', 'screen', 'performance', 'chrome',
     'innerWidth', 'innerHeight', 'outerWidth', 'outerHeight', 'devicePixelRatio',
     'isSecureContext', 'URL', 'URLSearchParams', 'BigInt', 'Blob', 'FileReader',
-    'ReadableStream', 'Worker', 'CSS', 'Event', 'MouseEvent', 'KeyboardEvent',
+    'ReadableStream', 'Worker', 'CSS', 'Node', 'DOMParser', 'Event', 'MouseEvent', 'KeyboardEvent',
     'CustomEvent', 'DOMException', 'MutationObserver', 'AbortSignal', 'AbortController',
     'MessageChannel', 'MessagePort', 'XMLHttpRequest', 'Headers', 'FormData',
-    'fetch', 'atob', 'btoa', 'eval', 'Function'
+    'Request', 'Response', 'fetch', 'atob', 'btoa', 'eval', 'Function',
+    'Audio', 'AudioContext', 'OfflineAudioContext', 'webkitAudioContext',
+    'webkitOfflineAudioContext', 'RTCPeerConnection', 'RTCSessionDescription',
+    'RTCIceCandidate', 'webkitRTCPeerConnection'
 ].forEach((key) => {
     if (rawWindow[key] !== undefined) context[key] = rawWindow[key];
 });
@@ -336,8 +482,6 @@ context.dispatchEvent = nativize(rawWindow.dispatchEvent.bind(rawWindow), 'dispa
 
 // Media & Canvas Glue
 context.WebGLRenderingContext = Media.WebGLRenderingContext;
-context.AudioContext = Media.AudioContext;
-context.OfflineAudioContext = Media.OfflineAudioContext;
 context.HTMLCanvasElement = class HTMLCanvasElement extends HTMLNodes.HTMLCanvasElement {
     constructor(ctx) {
         super(ctx);
@@ -358,10 +502,17 @@ context.Image = class Image extends HTMLNodes.HTMLImageElement {
 // 4. Proxy & Execution
 // =============================================================================
 // 注入 CF 配置 (从独立文件加载)
+// 计算原始 URL 的 query/hash（去掉 __cf_chl_tk 参数后）
+const ogUrl = new URL(targetUrl);
+ogUrl.searchParams.delete('__cf_chl_tk');
+ogUrl.searchParams.delete('__cf_chl_f_tk');
+const cOgUQuery = ogUrl.search || '';
+const cOgUHash  = ogUrl.hash  || '';
+
 const proxyConfig = proxyFactory.create({
-    ...cfConfig, // 载入配置
-    cOgUHash: urlObj.hash === '' && urlObj.href.indexOf('#') !== -1 ? '#' : urlObj.hash,
-    cOgUQuery: urlObj.search === '' && urlObj.href.slice(0, urlObj.href.length - urlObj.hash.length).indexOf('?') !== -1 ? '?' : urlObj.search
+    ...cfConfig,
+    cOgUHash,
+    cOgUQuery,
 }, "_cf_chl_opt");
 
 rawWindow._cf_chl_opt = proxyConfig;
@@ -401,6 +552,244 @@ delete context.global;
 delete context.process;
 delete context.Buffer;
 
+// =============================================================================
+// 4.5 动态脚本加载器 & Cookie 修复
+// =============================================================================
+const nodeFetch = require('node-fetch');
+
+// 已加载/正在加载的脚本 URL，避免重复执行
+// 预先标记 orchestrate 脚本（由 runner.runFile 直接执行，不需要再网络加载）
+const orchestratePattern = /cdn-cgi\/challenge-platform\/h\/b\/orchestrate/;
+const loadedScripts = new Set();
+
+const isTurnstileScript = (url) => /challenges\.cloudflare\.com\/turnstile\//.test(String(url || ''));
+
+const triggerScriptReady = (scriptEl, finalUrl, reason) => {
+    if (reason) console.log(`[ScriptLoader] ${reason}`);
+    if (scriptEl && typeof scriptEl.onload === 'function') {
+        try { scriptEl.onload(); } catch (e) {}
+    }
+
+    const onloadMatch = String(finalUrl || '').match(/[?&]onload=([^&]+)/);
+    if (!onloadMatch) return;
+
+    const cbName = decodeURIComponent(onloadMatch[1]);
+    console.log(`[ScriptLoader] 触发 Turnstile onload 回调: ${cbName}`);
+    try {
+        const cb = rawWindow[cbName] || context[cbName];
+        if (typeof cb === 'function') cb();
+        else console.log(`[ScriptLoader] onload 回调不存在: ${cbName}`);
+    } catch (e) {
+        console.log(`[ScriptLoader] 回调执行失败: ${e.message}`);
+    }
+};
+
+// 异步抓取并在 VM 中执行外链脚本
+const loadExternalScript = (scriptEl) => {
+    const src = scriptEl && (scriptEl.src || scriptEl.getAttribute('src'));
+    if (!src || loadedScripts.has(src)) return;
+    // orchestrate 脚本已经由 runner.runFile 执行过了，跳过网络加载
+    if (orchestratePattern.test(src)) {
+        console.log(`[ScriptLoader] 跳过（已本地执行）: ${src.substring(0, 80)}`);
+        triggerScriptReady(scriptEl, src);
+        return;
+    }
+    loadedScripts.add(src);
+
+    let finalUrl = src;
+    if (src.startsWith('/')) {
+        finalUrl = `https://www.sciencedirect.com${src}`;
+    }
+
+    console.log(`[ScriptLoader] 加载: ${finalUrl.substring(0, 100)}`);
+
+    nodeFetch(finalUrl, {
+        headers: {
+            'User-Agent': profile.userAgent,
+            'Referer': context.location.href,
+            'Accept': '*/*',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+        },
+        redirect: 'follow',
+        timeout: 15000,
+    }).then(async (resp) => {
+        const text = await resp.text();
+        if (!resp.ok) {
+            console.log(`[ScriptLoader] 响应 ${resp.status}，跳过执行: ${finalUrl.substring(0, 80)}`);
+            if (isTurnstileScript(finalUrl)) {
+                triggerScriptReady(scriptEl, finalUrl, 'Turnstile 使用本地 mock 继续');
+                return;
+            }
+            if (scriptEl.onerror) { try { scriptEl.onerror(); } catch(e){} }
+            return;
+        }
+        console.log(`[ScriptLoader] 执行 ${text.length} 字节: ${finalUrl.substring(0, 80)}`);
+        try {
+            runner.vm.run(text);
+            triggerScriptReady(scriptEl, finalUrl);
+        } catch(e) {
+            if (e.message && e.message.includes('contextified')) {
+                // vm2 沙箱限制：Turnstile 等脚本用了被 vm2 拦截的操作
+                // 改用 window.eval（已绑定为 runner.vm.run）执行
+                console.log(`[ScriptLoader] 尝试 eval 方式执行...`);
+                try {
+                    const evalFn = rawWindow.eval || ((s) => runner.vm.run(s));
+                    evalFn(text);
+                    triggerScriptReady(scriptEl, finalUrl);
+                } catch(e2) {
+                    console.log(`[ScriptLoader] eval 也失败: ${e2.message.substring(0, 100)}`);
+                    if (isTurnstileScript(finalUrl) && e2.stack) {
+                        console.log(`[ScriptLoader] Turnstile stack: ${String(e2.stack).split('\n').slice(0, 8).join(' | ')}`);
+                    }
+                    if (isTurnstileScript(finalUrl)) {
+                        triggerScriptReady(scriptEl, finalUrl, 'Turnstile 真实脚本不可执行，使用本地 mock 继续');
+                        return;
+                    }
+                    if (scriptEl.onerror) { try { scriptEl.onerror(); } catch(e3){} }
+                }
+            } else {
+                console.log(`[ScriptLoader] 执行错误: ${e.message}`);
+                if (isTurnstileScript(finalUrl) && e.stack) {
+                    console.log(`[ScriptLoader] Turnstile stack: ${String(e.stack).split('\n').slice(0, 8).join(' | ')}`);
+                }
+                // 尝试触发 onload（让脚本流程继续）
+                triggerScriptReady(scriptEl, finalUrl);
+            }
+        }
+    }).catch((err) => {
+        console.log(`[ScriptLoader] 网络错误: ${err.message}`);
+        if (isTurnstileScript(finalUrl)) {
+            triggerScriptReady(scriptEl, finalUrl, 'Turnstile 网络加载失败，使用本地 mock 继续');
+            return;
+        }
+        if (scriptEl.onerror) { try { scriptEl.onerror(); } catch(e){} }
+    });
+};
+
+// Hook appendChild：拦截 script 元素的插入
+const hookAppendChild = (element) => {
+    const original = element.appendChild.bind(element);
+    element.appendChild = nativize((child) => {
+        const result = original(child);
+        if (child && child.tagName === 'SCRIPT') {
+            const src = child.src || child.getAttribute('src');
+            if (src) {
+                setImmediate(() => loadExternalScript(child));
+            }
+        }
+        return result;
+    }, 'appendChild');
+};
+hookAppendChild(rawDocument.head);
+hookAppendChild(rawDocument.body);
+
+// 同样 hook document 级别的 appendChild
+const origDocAppend = rawDocument.appendChild.bind(rawDocument);
+rawDocument.appendChild = nativize((child) => {
+    const result = origDocAppend(child);
+    if (child && child.tagName === 'SCRIPT') {
+        const src = child.src || child.getAttribute('src');
+        if (src) setImmediate(() => loadExternalScript(child));
+    }
+    return result;
+}, 'appendChild');
+
+// document.cookie 与 cookieJar 双向绑定
+Object.defineProperty(rawDocument, 'cookie', {
+    get: () => cookieJar.getCookieString(context.location.href),
+    set: (val) => {
+        if (!val) return;
+        // 解析 set-cookie 格式字符串，写入 cookieJar
+        const parts = String(val).split(';');
+        const kv = parts[0].trim();
+        const [k, ...rest] = kv.split('=');
+        const key = k.trim();
+        const value = rest.join('=').trim();
+        if (key) {
+            cookieJar.cookies.set(key, value);
+        }
+    },
+    enumerable: true,
+    configurable: true,
+});
+
+// 补全：IntersectionObserver, ResizeObserver
+context.IntersectionObserver = nativize(class IntersectionObserver {
+    constructor(cb, opts) { this._cb = cb; }
+    observe(el) { setTimeout(() => { try { this._cb([{isIntersecting: true, target: el, intersectionRatio: 1}], this); } catch(e){} }, 50); }
+    unobserve() {}
+    disconnect() {}
+    takeRecords() { return []; }
+}, 'IntersectionObserver');
+rawWindow.IntersectionObserver = context.IntersectionObserver;
+
+context.ResizeObserver = nativize(class ResizeObserver {
+    constructor(cb) { this._cb = cb; }
+    observe(el) { setTimeout(() => { try { this._cb([{target: el, contentRect: {width:1280, height:720}}], this); } catch(e){} }, 50); }
+    unobserve() {}
+    disconnect() {}
+}, 'ResizeObserver');
+rawWindow.ResizeObserver = context.ResizeObserver;
+
+// PerformanceObserver
+context.PerformanceObserver = nativize(class PerformanceObserver {
+    constructor(cb) { this._cb = cb; }
+    observe() {}
+    disconnect() {}
+    takeRecords() { return []; }
+    static get supportedEntryTypes() { return ['measure', 'mark', 'navigation', 'paint', 'resource']; }
+}, 'PerformanceObserver');
+rawWindow.PerformanceObserver = context.PerformanceObserver;
+
+// =============================================================================
+// 4.6 Turnstile Mock & 脚本加载钩子优化
+// =============================================================================
+// Turnstile API Mock：vm2 无法直接执行真实 Turnstile，用 mock 代替让流程继续
+// 注意：mock 生成的 token 是占位符，需要真实 Turnstile 生成有效 token
+const turnstileMock = {
+    _widgets: new Map(),
+    _widgetIdx: 0,
+    render: nativize(function(container, params) {
+        const wId = 'ts_widget_' + (turnstileMock._widgetIdx++);
+        turnstileMock._widgets.set(wId, { container, params });
+        console.log(`[Turnstile] render() called, widgetId=${wId}, sitekey=${params && params.sitekey}`);
+        // 延迟500ms后尝试自动执行（模拟 managed/auto 模式）
+        setTimeout(() => {
+            try { turnstileMock.execute(wId); } catch(e) {}
+        }, 500);
+        return wId;
+    }, 'render'),
+    execute: nativize(function(widgetOrContainer, params) {
+        const widget = turnstileMock._widgets.get(widgetOrContainer);
+        const opts = widget ? widget.params : (params || {});
+        console.log(`[Turnstile] execute() called`);
+        // 如果有 callback，模拟调用（会生成占位 token，CF 服务器会拒绝）
+        // 真正有效的 token 需要真实 Turnstile 与 CF 服务器交互
+        if (typeof opts.callback === 'function') {
+            setTimeout(() => {
+                // 先尝试 auto-execute 路径
+                console.log(`[Turnstile] 尝试触发 callback...`);
+                try { opts.callback('TURNSTILE_PLACEHOLDER_TOKEN'); } catch(e) {}
+            }, 200);
+        }
+    }, 'execute'),
+    remove: nativize(function(widgetOrContainer) {
+        turnstileMock._widgets.delete(widgetOrContainer);
+    }, 'remove'),
+    reset: nativize(function(widgetOrContainer) {}, 'reset'),
+    getResponse: nativize(function(widgetOrContainer) { return ''; }, 'getResponse'),
+    isExpired: nativize(function(widgetOrContainer) { return false; }, 'isExpired'),
+    implicitRender: nativize(function() {}, 'implicitRender'),
+};
+rawWindow.turnstile = turnstileMock;
+context.turnstile = turnstileMock;
+
+// 从 cfConfig.fa 派生 __cf_chl_rt_tk URL（history.replaceState 用，纯装饰性）
+const rtTkUrl = (cfConfig.fa || cfConfig.cUPMDTk || '')
+    .replace('__cf_chl_f_tk=', '__cf_chl_rt_tk=')
+    .replace('__cf_chl_tk=', '__cf_chl_rt_tk=');
+const escapedRtTkUrl = rtTkUrl.replace(/\//g, '\\/');
+
 // 启动脚本
 const initScript = `
 (function () {
@@ -408,7 +797,7 @@ const initScript = `
     a.src = '/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=${cfConfig.cRay}';
     if (window.history && window.history.replaceState) {
         var ogU = location.pathname + window._cf_chl_opt.cOgUQuery + window._cf_chl_opt.cOgUHash;
-        history.replaceState(null, null, "\\/journal\\/phytochemistry-letters\\/issues?__cf_chl_rt_tk=.OsjsaDOkWliTeNQOf7nokkouVLo2hfCBAImALUHHVg-1754468250-1.0.1.1-zwYm2xWq.YoRBK5Xk67cv.lC6IrWV9iFRgOBZ4q4mmw" + window._cf_chl_opt.cOgUHash);
+        history.replaceState(null, null, "${escapedRtTkUrl}" + window._cf_chl_opt.cOgUHash);
         a.onload = function () { history.replaceState(null, null, ogU); }
     }
     document.head.appendChild(a);
@@ -430,7 +819,56 @@ setTimeout(() => {
     proxyWindow.dispatchEvent({type: 'load', isTrusted: true});
 }, 500);
 
+// 注入模拟鼠标/键盘事件，帮助 CF 指纹收集
+setTimeout(() => {
+    const mkMouseEvt = (type, x, y) => ({
+        type, isTrusted: true, bubbles: true, cancelable: true,
+        clientX: x, clientY: y, screenX: x+100, screenY: y+100,
+        pageX: x, pageY: y, movementX: Math.random()*5|0, movementY: Math.random()*3|0,
+        buttons: 0, button: 0, which: 0,
+        timeStamp: Date.now(),
+    });
+    const moves = [[200,300],[210,305],[215,310],[220,315],[230,320],[240,325],[250,330]];
+    let i = 0;
+    const moveInterval = setInterval(() => {
+        if (i < moves.length) {
+            const [x, y] = moves[i++];
+            proxyWindow.dispatchEvent(mkMouseEvt('mousemove', x, y));
+            proxyDocument.dispatchEvent(mkMouseEvt('mousemove', x, y));
+        } else {
+            clearInterval(moveInterval);
+            proxyWindow.dispatchEvent(mkMouseEvt('mousedown', 250, 330));
+            proxyWindow.dispatchEvent(mkMouseEvt('mouseup', 250, 330));
+            proxyWindow.dispatchEvent(mkMouseEvt('click', 250, 330));
+        }
+    }, 80);
+
+    // visibility change (页面可见)
+    proxyDocument.dispatchEvent({type: 'visibilitychange', isTrusted: true, bubbles: true});
+    proxyWindow.dispatchEvent({type: 'focus', isTrusted: true, bubbles: false});
+}, 800);
+
+// 调试：每 5 秒打印一次 Fsrf1 状态
+const debugInterval = setInterval(() => {
+    try {
+        const fsrf1Val = rawWindow._cf_chl_opt && rawWindow._cf_chl_opt.Fsrf1;
+        const len = Array.isArray(fsrf1Val) ? fsrf1Val.length : 'non-array';
+        console.log(`[Debug] Fsrf1 长度=${len}, 值=${JSON.stringify(fsrf1Val).substring(0,100)}`);
+        const allInputs = rawDocument.getElementsByTagName('input');
+        const allDivs = rawDocument.getElementsByTagName('div');
+        const allScripts = rawDocument.getElementsByTagName('script');
+        console.log(`[Debug] DOM inputs=${allInputs ? allInputs.length : 0}, divs=${allDivs ? allDivs.length : 0}, scripts=${allScripts ? allScripts.length : 0}`);
+    } catch(e) {}
+}, 5000);
+
 setInterval(() => {
+    const clearance = cookieJar.cookies && cookieJar.cookies.get('cf_clearance');
+    if (clearance) {
+        console.log("\n🚀🚀🚀 成功拿到 cf_clearance !!! 🚀🚀🚀");
+        console.log(`cf_clearance=${clearance}`);
+        process.exit(0);
+    }
+
     const inputs = rawDocument.getElementsByTagName('input');
     if (inputs && inputs.length > 0) {
         for (let i = 0; i < inputs.length; i++) {

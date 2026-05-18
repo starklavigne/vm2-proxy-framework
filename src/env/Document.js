@@ -20,14 +20,32 @@ class Document {
         this.scripts = [];
         this.readyState = 'complete'; // 关键属性
         this.onreadystatechange = null;
+        this.onerror = null;
+        this.onload = null;
+        this.onclick = null;
+        this.onvisibilitychange = null;
         this.cookie = "";
 
         // 确保 document.documentElement 存在
+        const elementNoop = function () { return elementNoop; };
+        Object.defineProperty(elementNoop, 'toString', {
+            value: () => '',
+            configurable: true
+        });
+        const withElementFallback = (el) => new Proxy(el, {
+            get(target, prop, receiver) {
+                if (prop in target || typeof prop === 'symbol') return Reflect.get(target, prop, receiver);
+                return elementNoop;
+            },
+            set(target, prop, value, receiver) {
+                return Reflect.set(target, prop, value, receiver);
+            }
+        });
         const createEl = (ClassType, tagName) => {
             const el = new ClassType(windowContext);
             if (tagName) el.tagName = tagName;
             el.ownerDocument = this;
-            return el;
+            return withElementFallback(el);
         };
 
         this.documentElement = createEl(HTMLHtmlElement);
@@ -75,16 +93,27 @@ class Document {
 
         // --- API 实现 ---
         this.getElementById = nativize((id) => {
+            const found = findById(this.documentElement, id);
+            if (found) return found;
+            // 自动创建常见 CF 挑战页面容器
+            const knownIds = ['challenge-form','cf-challenge-form','cf-challenge-body',
+                'cf-challenge-running','cf-chl-widget','ctp-checkbox','jklY6',
+            ];
             if (id === 'challenge-form' || id === 'cf-challenge-form') {
-                const exist = findById(this.documentElement, id);
-                if (exist) return exist;
                 const form = createEl(HTMLFormElement);
                 form.id = id;
                 this.body.appendChild(form);
                 return form;
             }
-            // 找不到时返回 theZombie，防止崩溃
-            return findById(this.documentElement, id) || theZombie;
+            if (knownIds.includes(id)) {
+                console.log(`[Document] getElementById('${id}') 未找到，自动创建`);
+                const div = createEl(HTMLDivElement);
+                div.id = id;
+                this.body.appendChild(div);
+                return div;
+            }
+            console.log(`[Document] getElementById('${id}') → Zombie`);
+            return theZombie;
         }, 'getElementById');
 
         this.getElementsByTagName = nativize((tagName) => {
@@ -100,17 +129,26 @@ class Document {
             if (selector === 'body') return this.body;
             if (selector === 'head') return this.head;
             if (selector === 'html') return this.documentElement;
-            if (selector === '#jklY6') {
-                return findById(this.documentElement, 'jklY6');
-            }
             if (selector.startsWith('#')) return this.getElementById(selector.slice(1));
+            if (selector.startsWith('.')) {
+                const result = [];
+                const cls = selector.slice(1);
+                const traverseByClass2 = (node) => {
+                    if (node.classList && node.classList.contains && node.classList.contains(cls)) result.push(node);
+                    if (node._children) node._children.forEach(traverseByClass2);
+                };
+                traverseByClass2(this.documentElement);
+                if (result.length) return result[0];
+            }
             if (this.documentElement && typeof this.documentElement.querySelector === 'function') {
                 const found = this.documentElement.querySelector(selector);
                 if (found) return found;
             }
             const tag = selector.toUpperCase();
             const els = this.getElementsByTagName(tag);
-            return els.length > 0 ? els[0] : theZombie;
+            if (els.length > 0) return els[0];
+            console.log(`[Document] querySelector('${selector}') → Zombie`);
+            return theZombie;
         }, 'querySelector');
 
         this.querySelectorAll = nativize((selector) => {

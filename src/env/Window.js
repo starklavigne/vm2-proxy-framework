@@ -3,11 +3,13 @@ const Screen = require('./Screen');
 const Performance = require('./Performance');
 const Crypto = require('./Crypto');
 const {XMLHttpRequest, Headers, FormData} = require('./NetworkMock');
+const {theZombie} = require('./HTMLNode');
 // 引入 nativize
 const { nativize } = require('../utils/tools');
 
 class Window {
     constructor(context, profile = {}) {
+        this._context = context;
         // 全局对象注入
         const globals = [
             'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp', 'Date', 'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy', 'WeakMap', 'WeakSet', 'Map', 'Set', 'DataView', 'ArrayBuffer',
@@ -76,6 +78,11 @@ class Window {
 
         // Events
         this._listeners = {};
+        this.onerror = null;
+        this.onload = null;
+        this.onclick = null;
+        this.onmessage = null;
+        this.onunhandledrejection = null;
         this.addEventListener = nativize((type, listener) => {
             if (!this._listeners[type]) this._listeners[type] = [];
             this._listeners[type].push(listener);
@@ -127,17 +134,26 @@ class Window {
                 // 1. 优先 Window 自身属性
                 if (prop in target) return Reflect.get(target, prop, receiver);
 
-                // 2. 尝试从 Document 查找 ID (window.id 特性)
+                // 2. vm2 顶层 this/sandbox 与 window 不是同一个对象，先同步读取 sandbox 顶层属性
+                if (typeof prop === 'string' && target._context && prop in target._context) {
+                    return target._context[prop];
+                }
+
+                // 3. 尝试从 Document 查找真实 ID (window.id 特性)
                 if (typeof prop === 'string' && target.document && target.document.getElementById) {
-                    // 直接调用 getElementById，它现在保证返回 theZombie 而不是 null
                     const el = target.document.getElementById(prop);
-                    // 只要名字不是极其特殊的（防止污染），就返回
-                    if (prop !== 'then' && prop !== 'toJSON') {
+                    if (el && el !== theZombie && prop !== 'then' && prop !== 'toJSON') {
                         return el;
                     }
                 }
 
                 return undefined;
+            },
+            set: (target, prop, value, receiver) => {
+                if (typeof prop === 'string' && target._context) {
+                    target._context[prop] = value;
+                }
+                return Reflect.set(target, prop, value, receiver);
             }
         });
     }

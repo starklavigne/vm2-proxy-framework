@@ -47,13 +47,19 @@ const cookieJar = {
         return list.join('; ');
     },
     setCookie(setCookieHeader) {
-        if (!setCookieHeader) return;
+        if (!setCookieHeader) return [];
+        const updated = [];
         const cookies = Array.isArray(setCookieHeader) ? setCookieHeader : [setCookieHeader];
         cookies.forEach(str => {
             const part = str.split(';')[0];
             const [key, val] = part.split('=');
-            if (key) this.cookies.set(key.trim(), val);
+            if (key) {
+                const name = key.trim();
+                this.cookies.set(name, val);
+                updated.push(name);
+            }
         });
+        return updated;
     }
 };
 

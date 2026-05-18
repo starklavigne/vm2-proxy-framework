@@ -69,7 +69,7 @@ class VMRunner {
                             if (typeof this !== 'function') {
                                 return function () {};
                             }
-                            return nativeBind.apply(this, args);
+                            return Reflect.apply(nativeBind, this, args);
                         },
                         writable: false,
                         configurable: false
