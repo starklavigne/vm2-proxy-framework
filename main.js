@@ -16,6 +16,7 @@ const cfConfig = require('./src/config/cfConfig'); // 独立的 CF 配置
 const {nativize, cookieJar} = require('./src/utils/tools');
 
 const pureTurnstileMode = process.env.PURE_TURNSTILE === '1';
+const pureStateDebug = process.env.PURE_STATE_DEBUG === '1';
 
 const importCookieFile = () => {
     const cookiePath = path.join(__dirname, 'src/config/cfCookies.json');
@@ -430,11 +431,142 @@ for (const key in libDoc) {
 rawDocument.createElement = nativize((tag) => {
     const tagName = tag.toUpperCase();
     if (tagName !== 'SCRIPT') console.log(`[DOM] createElement('${tag}')`);
-    const clsName = `HTML${tagName.charAt(0).toUpperCase() + tagName.slice(1).toLowerCase()}Element`;
+    const specialClassNames = {
+        IFRAME: 'HTMLIFrameElement',
+        CANVAS: 'HTMLCanvasElement',
+    };
+    const clsName = specialClassNames[tagName] || `HTML${tagName.charAt(0).toUpperCase() + tagName.slice(1).toLowerCase()}Element`;
     if (context[clsName]) return new context[clsName](rawWindow);
     return new context.HTMLElement(tagName, rawWindow);
 }, 'createElement');
+const findRawElementById = (root, id, tagName = null) => {
+    if (!root || (typeof root !== 'object' && typeof root !== 'function')) return null;
+    if (root.id === id && (!tagName || root.tagName === tagName)) return root;
+    if (root.shadowRoot) {
+        const foundInShadow = findRawElementById(root.shadowRoot, id, tagName);
+        if (foundInShadow) return foundInShadow;
+    }
+    const children = Array.isArray(root._children) ? root._children : (root.childNodes || []);
+    for (const child of Array.from(children)) {
+        const found = findRawElementById(child, id, tagName);
+        if (found) return found;
+    }
+    return null;
+};
+rawDocument.getElementById = nativize((id) => {
+    const wanted = String(id);
+    const found = findRawElementById(rawDocument.documentElement, wanted);
+    if (found) return found;
+    if (/^cf-chl-widget-.+-fr$/.test(wanted)) {
+        const baseId = wanted.slice(0, -3);
+        const frame = findRawElementById(rawDocument.documentElement, baseId, 'IFRAME') ||
+            findRawElementById(rawDocument.documentElement, baseId);
+        if (frame) return frame;
+    }
+    const knownIds = ['challenge-form', 'cf-challenge-form', 'cf-challenge-body',
+        'cf-challenge-running', 'cf-chl-widget', 'ctp-checkbox', 'jklY6',
+        'sdsJu6', 'cuBkB7'];
+    if (wanted === 'challenge-form' || wanted === 'cf-challenge-form') {
+        const form = rawDocument.createElement('form');
+        form.id = wanted;
+        rawDocument.body.appendChild(form);
+        return form;
+    }
+    if (knownIds.includes(wanted)) {
+        console.log(`[Document] getElementById('${wanted}') 未找到，自动创建`);
+        const div = rawDocument.createElement('div');
+        div.id = wanted;
+        rawDocument.body.appendChild(div);
+        return div;
+    }
+    console.log(`[Document] getElementById('${wanted}') → Zombie`);
+    return HTMLNodes.theZombie;
+}, 'getElementById');
 rawDocument.contains = nativize((node) => (node === rawDocument.documentElement || node === rawDocument.body), 'contains');
+rawDocument.parentNode = null;
+rawDocument.parentElement = null;
+rawDocument.tagName = 'BODY';
+rawDocument.nodeName = '#document';
+rawDocument.previousSibling = null;
+rawDocument.nextSibling = null;
+rawDocument.previousElementSibling = null;
+rawDocument.nextElementSibling = null;
+const nodeFilter = {
+    FILTER_ACCEPT: 1,
+    FILTER_REJECT: 2,
+    FILTER_SKIP: 3,
+    SHOW_ALL: 0xFFFFFFFF,
+    SHOW_ELEMENT: 0x1,
+    SHOW_TEXT: 0x4,
+};
+context.NodeFilter = nodeFilter;
+rawWindow.NodeFilter = nodeFilter;
+rawDocument.createNodeIterator = nativize((root, whatToShow = nodeFilter.SHOW_ALL, filter = null) => {
+    const nodes = [];
+    const accepts = (node) => {
+        if (!filter) return true;
+        try {
+            if (typeof filter === 'function') return filter(node) === nodeFilter.FILTER_ACCEPT;
+            if (filter && typeof filter.acceptNode === 'function') return filter.acceptNode(node) === nodeFilter.FILTER_ACCEPT;
+        } catch (e) {
+            return false;
+        }
+        return true;
+    };
+    const visit = (node) => {
+        if (!node || (typeof node !== 'object' && typeof node !== 'function')) return;
+        if ((whatToShow & nodeFilter.SHOW_ELEMENT) && node.nodeType === 1 && accepts(node)) nodes.push(node);
+        if ((whatToShow & nodeFilter.SHOW_TEXT) && node.nodeType === 3 && accepts(node)) nodes.push(node);
+        const children = Array.isArray(node._children) ? node._children : (node.childNodes || []);
+        for (const child of Array.from(children)) visit(child);
+    };
+    visit(root);
+    if (process.env.PURE_IFRAME_DEBUG === '1') {
+        console.log(`[NodeIterator] root=${root && (root.tagName || root.nodeType)} what=${whatToShow} filter=${filter ? typeof filter : 'none'} nodes=${nodes.length}`);
+        console.log(`[NodeIterator] nodes=${nodes.map((node, idx) => {
+            const parent = node && node.parentNode;
+            return `${idx}:${node && (node.tagName || node.nodeType)}#${node && node.id || ''}->${parent === undefined ? 'undefined' : parent === null ? 'null' : (parent.tagName || parent.nodeType || 'object')}`;
+        }).join(' | ')}`);
+    }
+    let index = 0;
+    const iterator = {
+        root,
+        whatToShow,
+        filter,
+        referenceNode: root || null,
+        currentNode: root || null,
+        pointerBeforeReferenceNode: true,
+        nextNode: nativize(() => {
+            const node = nodes[index++] || null;
+            if (node) {
+                iterator.referenceNode = node;
+                iterator.currentNode = node;
+                iterator.pointerBeforeReferenceNode = false;
+            }
+            return node;
+        }, 'nextNode'),
+        previousNode: nativize(() => {
+            index = Math.max(0, index - 1);
+            const node = nodes[index] || null;
+            if (node) {
+                iterator.referenceNode = node;
+                iterator.currentNode = node;
+                iterator.pointerBeforeReferenceNode = true;
+            }
+            return node;
+        }, 'previousNode'),
+        detach: nativize(() => {}, 'detach'),
+    };
+    return iterator;
+}, 'createNodeIterator');
+const featurePolicy = {
+    features: nativize(() => [], 'features'),
+    allowedFeatures: nativize(() => [], 'allowedFeatures'),
+    allowsFeature: nativize(() => false, 'allowsFeature'),
+    getAllowlistForFeature: nativize(() => [], 'getAllowlistForFeature'),
+};
+rawDocument.featurePolicy = featurePolicy;
+rawDocument.permissionsPolicy = featurePolicy;
 
 // 智能 currentScript (获取 ray ID)
 let activeExternalScript = null;
@@ -556,6 +688,7 @@ context.__cf_chl_opt = proxyConfig;
 // 创建全局 Proxy
 const proxyWindow = proxyFactory.create(rawWindow, "window");
 const proxyDocument = proxyFactory.create(rawDocument, "document");
+rawDocument.parentNode = proxyDocument;
 
 context.window = proxyWindow;
 context.self = proxyWindow;
@@ -580,6 +713,19 @@ rawWindow.DOMCollection = context.DOMCollection;
 context.EventTarget = EventTarget;
 context.Window = Window;
 
+proxyFactory.createFallbackElement = () => {
+    const el = rawDocument.createElement('div');
+    el.ownerDocument = rawDocument;
+    el.style.width = '300px';
+    el.style.height = '65px';
+    el.style.display = 'block';
+    if (!el.id) el.id = `cf-fallback-${Math.random().toString(36).slice(2)}`;
+    if (rawDocument.body && typeof rawDocument.body.appendChild === 'function' && !rawDocument.body.contains(el)) {
+        rawDocument.body.appendChild(el);
+    }
+    return el;
+};
+
 // 清理环境
 delete context.global;
 delete context.process;
@@ -597,6 +743,9 @@ const loadedScripts = new Set();
 
 const isTurnstileScript = (url) => /challenges\.cloudflare\.com\/turnstile\//.test(String(url || ''));
 let pendingTurnstileOnloadName = null;
+let pendingTurnstileInitialOnloadCallback = null;
+let pendingTurnstileStateSnapshot = null;
+let pendingTurnstileOnloadSince = 0;
 const invokedTurnstileOnloads = new WeakSet();
 let turnstileRenderSeen = false;
 let turnstileOnloadReplayCount = 0;
@@ -604,6 +753,16 @@ let turnstileOnloadLastReplay = 0;
 
 const executeTurnstileInHostRealm = (source, finalUrl) => {
     const safeUrl = String(finalUrl || 'turnstile-host.js').replace(/[\r\n]/g, '');
+    if (pureTurnstileMode && isTurnstileScript(finalUrl)) {
+        const guardExpr = (label, expr, fallback) =>
+            `(function(){try{return ${expr}}catch(e){console.log("[TurnstileGuard] ${label}: "+(e&&e.message));return ${fallback}}})()`;
+        source = source
+            .replace('"ht.atrs":o(document.body.parentNode)', `"ht.atrs":${guardExpr('ht.atrs', 'o(document.body.parentNode)', '[]')}`)
+            .replace('ffp:ia(r.wrapper)', `ffp:${guardExpr('ffp', 'ia(r.wrapper)', '""')}`)
+            .replace('pfp:oa(document,Fr,Dr)', `pfp:${guardExpr('pfp', 'oa(document,Fr,Dr)', '""')}`)
+            .replace('wp:na(r.wrapper)', `wp:${guardExpr('wp', 'na(r.wrapper)', '""')}`)
+            .replace('xp:aa(r.wrapper).slice(0,Wr)', `xp:${guardExpr('xp', 'aa(r.wrapper).slice(0,Wr)', '""')}`);
+    }
     const hostIntrinsicNames = [
         'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp',
         'Date', 'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy',
@@ -655,6 +814,15 @@ const triggerScriptReady = (scriptEl, finalUrl, reason) => {
     if (isTurnstile) pendingTurnstileOnloadName = cbName;
     if (pureTurnstileMode && isTurnstile) {
         const cb = rawWindow[cbName] || context[cbName];
+        pendingTurnstileInitialOnloadCallback = typeof cb === 'function' ? cb : null;
+        pendingTurnstileOnloadSince = Date.now();
+        pendingTurnstileStateSnapshot = new Map();
+        for (const source of [rawWindow, context]) {
+            for (const key of Reflect.ownKeys(source)) {
+                if (typeof key !== 'string' || pendingTurnstileStateSnapshot.has(key)) continue;
+                pendingTurnstileStateSnapshot.set(key, Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
+            }
+        }
         console.log(`[ScriptLoader] PURE_TURNSTILE: 延后 onload，当前回调类型: ${typeof cb}`);
         return;
     }
@@ -703,10 +871,32 @@ const installTurnstileProbe = () => {
 };
 
 if (pureTurnstileMode) {
+    const derivePureGlobalKeys = () => {
+        const fallback = ['rLIi5', 'fAJq8', 'Bccyw0', 'UJYG7', 'RuXv0', 'qOQn5', 'GViAi4', 'Zrha9', 'dKdZ9'];
+        try {
+            const source = fs.readFileSync(path.join(__dirname, 'target/target.js'), 'utf8');
+            const match = source.match(/['"](_cf_chl_opt;_cf_chl_state;[^'"]+)['"]\.split\(['"];\s*['"]\)/);
+            if (!match) return fallback;
+            return match[1]
+                .split(';')
+                .filter((key) => key && !key.startsWith('_cf_'))
+                .filter((key) => key !== 'puQFi0' && key !== 'frameElement')
+                .slice(0, 24);
+        } catch (e) {
+            return fallback;
+        }
+    };
+    const pureGlobalKeys = derivePureGlobalKeys();
+    const ownValue = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
+    const globalValue = (key) => {
+        const rawVal = ownValue(rawWindow, key);
+        if (rawVal !== undefined) return rawVal;
+        return ownValue(context, key);
+    };
     const dumpPureState = (label) => {
-        const keys = ['rLIi5', 'fAJq8', 'Bccyw0', 'UJYG7', 'RuXv0', 'qOQn5', 'GViAi4', 'Zrha9', 'dKdZ9'];
+        const keys = pureGlobalKeys;
         const state = keys.map((key) => {
-            const val = rawWindow[key] !== undefined ? rawWindow[key] : context[key];
+            const val = globalValue(key);
             const type = typeof val;
             const text = type === 'function' ? 'function' : type === 'object' && val ? (val.tagName || val.constructor && val.constructor.name || 'object') : String(val);
             return `${key}:${type}:${text}`;
@@ -716,20 +906,35 @@ if (pureTurnstileMode) {
 	    const onloadReplay = setInterval(() => {
 	        if (turnstileRenderSeen || turnstileOnloadReplayCount >= 12) return;
 	        if (!pendingTurnstileOnloadName) return;
-	        if (rawWindow.Bccyw0 === true || context.Bccyw0 === true) {
+	        if (ownValue(rawWindow, 'Bccyw0') === true || ownValue(context, 'Bccyw0') === true) {
 	            if (turnstileOnloadReplayCount === 0) dumpPureState('skip-replay-already-initialized');
 	            turnstileOnloadReplayCount = 12;
 	            return;
-	        }
-	        const cb = rawWindow[pendingTurnstileOnloadName] || context[pendingTurnstileOnloadName];
+        }
+        const cb = globalValue(pendingTurnstileOnloadName);
         if (typeof cb !== 'function') return;
-        const hasChallengeState = !!(
-            rawWindow.RuXv0 || context.RuXv0 ||
-            rawWindow.qOQn5 || context.qOQn5 ||
-            rawWindow.dKdZ9 || context.dKdZ9
-        );
+        if (invokedTurnstileOnloads.has(cb)) {
+            turnstileOnloadReplayCount = 12;
+            return;
+        }
+        const callbackReplaced = pendingTurnstileInitialOnloadCallback && cb !== pendingTurnstileInitialOnloadCallback;
+        const hasChallengeState = callbackReplaced || pureGlobalKeys.some((key) => {
+            if (key === pendingTurnstileOnloadName) return false;
+            const val = globalValue(key);
+            const oldVal = pendingTurnstileStateSnapshot && pendingTurnstileStateSnapshot.has(key)
+                ? pendingTurnstileStateSnapshot.get(key)
+                : undefined;
+            return val !== oldVal && val !== undefined && val !== '' &&
+                typeof val !== 'function' && typeof val !== 'boolean';
+        });
         if (!hasChallengeState) {
-            if (turnstileOnloadReplayCount === 0 && Date.now() - turnstileOnloadLastReplay > 1000) {
+            if (pendingTurnstileOnloadSince && Date.now() - pendingTurnstileOnloadSince > 8000) {
+                dumpPureState('wait-challenge-state-timeout');
+                console.log('[ScriptLoader] PURE_TURNSTILE: 等待挑战状态超时，停止 onload 重放等待');
+                turnstileOnloadReplayCount = 12;
+                return;
+            }
+            if (pureStateDebug && turnstileOnloadReplayCount === 0 && Date.now() - turnstileOnloadLastReplay > 1000) {
                 dumpPureState('wait-challenge-state');
                 turnstileOnloadLastReplay = Date.now();
             }
@@ -737,10 +942,10 @@ if (pureTurnstileMode) {
         }
         if (Date.now() - turnstileOnloadLastReplay < 1000) return;
         if (turnstileOnloadReplayCount === 0) {
-            delete rawWindow.fAJq8;
-            delete context.fAJq8;
-            delete rawWindow.Bccyw0;
-            delete context.Bccyw0;
+            for (const key of ['fAJq8', 'Bccyw0', 'wzzNi2', 'TMvR3']) {
+                delete rawWindow[key];
+                delete context[key];
+            }
         }
         dumpPureState(`before-replay-${turnstileOnloadReplayCount + 1}`);
         console.log(`[ScriptLoader] PURE_TURNSTILE: 重放 onload 回调 ${pendingTurnstileOnloadName}`);

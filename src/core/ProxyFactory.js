@@ -1,6 +1,10 @@
 class ProxyFactory {
     constructor(config = {}) {
         this.enableLog = config.enableLog || false;
+        this.silentLogProps = new Set(config.silentLogProps || [
+            'window.puQFi0',
+            '_cf_chl_opt.Udvh4'
+        ]);
         this.hiddenProps = new Set(['_context', '_children', '_attributes', '_parentNode', '_uid']);
         this.noopMethods = new Set([
             'appendChild', 'insertBefore', 'removeChild', 'replaceChild', 'remove',
@@ -33,6 +37,51 @@ class ProxyFactory {
     create(target, name = "root") {
         if (target && target.__isProxy) return target;
 
+        const createFallbackElement = () => {
+            if (typeof this.createFallbackElement === 'function') {
+                return this.createFallbackElement();
+            }
+            return {
+                nodeType: 1,
+                tagName: 'DIV',
+                style: {},
+                className: '',
+                classList: {add() {}, remove() {}, contains() { return false; }, toggle() { return false; }},
+                children: [],
+                childNodes: [],
+                appendChild(child) {
+                    if (child) {
+                        child.parentNode = this;
+                        this.children.push(child);
+                        this.childNodes.push(child);
+                    }
+                    return child;
+                },
+                removeChild(child) {
+                    this.children = this.children.filter((item) => item !== child);
+                    this.childNodes = this.childNodes.filter((item) => item !== child);
+                    return child;
+                },
+                insertBefore(child) { return this.appendChild(child); },
+                setAttribute(key, value) { this[key] = String(value); },
+                getAttribute(key) { return this[key] || null; },
+                querySelector() { return null; },
+                querySelectorAll() { return []; },
+                getBoundingClientRect() { return {top: 0, left: 0, right: 300, bottom: 65, width: 300, height: 65, x: 0, y: 0}; }
+            };
+        };
+
+        const ensureQueryable = (value) => {
+            if (!value || (typeof value !== 'object' && typeof value !== 'function')) return value;
+            if (typeof value.querySelector !== 'function') {
+                value.querySelector = function () { return createFallbackElement(); };
+            }
+            if (typeof value.querySelectorAll !== 'function') {
+                value.querySelectorAll = function () { return []; };
+            }
+            return value;
+        };
+
         const handler = {
             get: (target, prop, receiver) => {
                 if (prop === '__isProxy' || prop === '_isProxy') return true;
@@ -49,14 +98,8 @@ class ProxyFactory {
                 }
 
                 const value = Reflect.get(target, prop, receiver);
-                if (prop === 'XHwg6' && value && (typeof value === 'object' || typeof value === 'function')) {
-                    if (typeof value.querySelector !== 'function') {
-                        value.querySelector = function () { return null; };
-                    }
-                    if (typeof value.querySelectorAll !== 'function') {
-                        value.querySelectorAll = function () { return []; };
-                    }
-                    return value;
+                if (prop === 'XHwg6' || prop === 'YrpWf3') {
+                    return ensureQueryable(value);
                 }
                 if ((prop === 'querySelector' || prop === 'querySelectorAll') && typeof value !== 'function') {
                     return function () {
@@ -85,9 +128,10 @@ class ProxyFactory {
                     return bound;
                 }
 
-                if (this.enableLog && prop !== 'toString' && prop !== 'toJSON' && typeof prop === 'string') {
+                const logName = `${name}.${String(prop)}`;
+                if (this.enableLog && prop !== 'toString' && prop !== 'toJSON' && typeof prop === 'string' && !this.silentLogProps.has(logName)) {
                     if (value !== undefined) {
-                         console.log(`[读] ${name}.${String(prop)}`);
+                         console.log(`[读] ${logName}`);
                     }
                 }
 
@@ -99,15 +143,11 @@ class ProxyFactory {
                 return value;
             },
             set: (target, prop, value, receiver) => {
-                if (prop === 'XHwg6' && value && (typeof value === 'object' || typeof value === 'function')) {
-                    if (typeof value.querySelector !== 'function') {
-                        value.querySelector = function () { return null; };
-                    }
-                    if (typeof value.querySelectorAll !== 'function') {
-                        value.querySelectorAll = function () { return []; };
-                    }
+                if (prop === 'XHwg6' || prop === 'YrpWf3') {
+                    ensureQueryable(value);
                 }
-                if (this.enableLog) {
+                const logName = `${name}.${String(prop)}`;
+                if (this.enableLog && !this.silentLogProps.has(logName)) {
                     console.log(`[写] ${name}.${String(prop)} = ${String(value).substring(0, 50)}`);
                 }
                 return Reflect.set(target, prop, value, receiver);

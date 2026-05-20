@@ -1,5 +1,6 @@
 const Crypto = require('./Crypto');
 const EventTarget = require('./EventTarget');
+const pureIframeDebug = process.env.PURE_IFRAME_DEBUG === '1';
 
 // ==========================================
 // 1. 原生伪装工具
@@ -134,6 +135,59 @@ const matchesSimpleSelector = (node, selector) => {
     return true;
 };
 
+const querySelectorWithin = (root, selector) => {
+    if (!selector) return theZombie;
+    const shouldLog = !String(selector).startsWith('#cf-chl-widget-');
+    const selectors = String(selector).split(',').map((part) => part.trim()).filter(Boolean);
+    for (const sel of selectors) {
+        if (sel.startsWith('#') && !/[\s>+~]/.test(sel)) {
+            const id = sel.slice(1);
+            const local = walkElements(root, (node) => node.id === id);
+            if (local) {
+                if (shouldLog) console.log(`[Element] querySelector('${selector}') → ${local.tagName || 'node'}${local.id ? '#' + local.id : ''}`);
+                return local;
+            }
+            const byId = root.ownerDocument && root.ownerDocument.getElementById
+                ? root.ownerDocument.getElementById(id)
+                : null;
+            if (byId && byId !== theZombie) {
+                if (shouldLog) console.log(`[Element] querySelector('${selector}') → ${byId.tagName || 'node'}${byId.id ? '#' + byId.id : ''}`);
+                return byId;
+            }
+        }
+        const parts = sel.split(/\s+/);
+        const last = parts[parts.length - 1];
+        const found = walkElements(root, (node) => matchesSimpleSelector(node, last));
+        if (found) {
+            if (shouldLog) console.log(`[Element] querySelector('${selector}') → ${found.tagName || 'node'}${found.id ? '#' + found.id : ''}`);
+            return found;
+        }
+    }
+    if (shouldLog) console.log(`[Element] querySelector('${selector}') → Zombie`);
+    return theZombie;
+};
+
+const querySelectorAllWithin = (root, selector) => {
+    const selectors = String(selector || '').split(',').map((part) => part.trim()).filter(Boolean);
+    if (!selectors.length) return [];
+    return collectElements(root, (node) => selectors.some((sel) => matchesSimpleSelector(node, sel.split(/\s+/).pop())));
+};
+
+const ensureQueryableNode = (node) => {
+    if (!node || (typeof node !== 'object' && typeof node !== 'function')) return node;
+    if (typeof node.querySelector !== 'function') {
+        node.querySelector = function (selector) {
+            return querySelectorWithin(this, selector);
+        };
+    }
+    if (typeof node.querySelectorAll !== 'function') {
+        node.querySelectorAll = function (selector) {
+            return querySelectorAllWithin(this, selector);
+        };
+    }
+    return node;
+};
+
 const createElementFromHTML = (html, context) => {
     const tagMatch = html.match(/^<\s*([A-Za-z0-9:-]+)/);
     if (!tagMatch) return null;
@@ -215,6 +269,13 @@ class ZombieElement {
         this.textContent = '';
         this.value = '';
         this._listeners = {};
+        this.contentWindow = {
+            eval: nativize(() => undefined, 'eval'),
+            postMessage: nativize(() => {}, 'postMessage'),
+            document: this,
+            location: createLocationLike('about:blank'),
+        };
+        this.contentDocument = this;
     }
 
     addEventListener() {}
@@ -286,10 +347,26 @@ class Element extends EventTarget {
         this.classList = createClassList(this);
         this.ownerDocument = context ? context.document : null;
         this.shadowRoot = null;
+        this.contentWindow = {
+            eval: nativize((source) => {
+                if (context && typeof context.eval === 'function') return context.eval(String(source));
+                return undefined;
+            }, 'eval'),
+            postMessage: nativize(() => {}, 'postMessage'),
+        };
+        this.contentDocument = null;
     }
 
-    get parentNode() { return this._parentNode || theZombie; }
-    set parentNode(node) { this._parentNode = node; }
+    get parentNode() { return ensureQueryableNode(this._parentNode || theZombie); }
+    set parentNode(node) { this._parentNode = ensureQueryableNode(node); }
+    get isConnected() {
+        let node = this;
+        while (node && node !== theZombie) {
+            if (node.nodeType === 9) return true;
+            node = node.parentNode;
+        }
+        return false;
+    }
 
     get innerHTML() { return ""; }
     set innerHTML(val) {
@@ -304,6 +381,9 @@ class Element extends EventTarget {
 
     get children() { return this._children; }
     get childNodes() { return this._children; }
+    get attributes() {
+        return Object.keys(this._attributes).map((name) => ({name, value: this._attributes[name]}));
+    }
     get firstChild() { return this._children[0] || theZombie; }
     get lastChild() { return this._children[this._children.length - 1] || theZombie; }
     get parentElement() { return this.parentNode && this.parentNode.nodeType === 1 ? this.parentNode : theZombie; }
@@ -316,13 +396,13 @@ class Element extends EventTarget {
     }
 
     get nextSibling() {
-        if (!this._parentNode || this._parentNode === theZombie) return theZombie;
+        if (!this._parentNode || this._parentNode === theZombie || !Array.isArray(this._parentNode._children)) return theZombie;
         const idx = this._parentNode._children.indexOf(this);
-        return this._parentNode._children[idx + 1] || theZombie;
+        return idx >= 0 ? (this._parentNode._children[idx + 1] || theZombie) : theZombie;
     }
 
     get previousSibling() {
-        if (!this._parentNode || this._parentNode === theZombie) return theZombie;
+        if (!this._parentNode || this._parentNode === theZombie || !Array.isArray(this._parentNode._children)) return theZombie;
         const idx = this._parentNode._children.indexOf(this);
         return idx > 0 ? this._parentNode._children[idx - 1] : theZombie;
     }
@@ -424,36 +504,17 @@ class Element extends EventTarget {
         return collectElements(this, (node) => node.nodeType === 1 && node.classList && node.classList.contains(className));
     }
 
+    getElementById(id) {
+        const wanted = String(id);
+        return walkElements(this, (node) => node.id === wanted) || null;
+    }
+
     querySelector(selector) {
-        if (!selector) return theZombie;
-        const selectors = String(selector).split(',').map((part) => part.trim()).filter(Boolean);
-        for (const sel of selectors) {
-            if (sel.startsWith('#') && !/[\s>+~]/.test(sel)) {
-                const id = sel.slice(1);
-                const byId = this.ownerDocument && this.ownerDocument.getElementById
-                    ? this.ownerDocument.getElementById(id)
-                    : null;
-                if (byId) {
-                    console.log(`[Element] querySelector('${selector}') → ${byId.tagName || 'node'}${byId.id ? '#' + byId.id : ''}`);
-                    return byId;
-                }
-            }
-            const parts = sel.split(/\s+/);
-            const last = parts[parts.length - 1];
-            const found = walkElements(this, (node) => matchesSimpleSelector(node, last));
-            if (found) {
-                console.log(`[Element] querySelector('${selector}') → ${found.tagName || 'node'}${found.id ? '#' + found.id : ''}`);
-                return found;
-            }
-        }
-        console.log(`[Element] querySelector('${selector}') → Zombie`);
-        return theZombie;
+        return querySelectorWithin(this, selector);
     }
 
     querySelectorAll(selector) {
-        const selectors = String(selector || '').split(',').map((part) => part.trim()).filter(Boolean);
-        if (!selectors.length) return [];
-        return collectElements(this, (node) => selectors.some((sel) => matchesSimpleSelector(node, sel.split(/\s+/).pop())));
+        return querySelectorAllWithin(this, selector);
     }
 
     append(...nodes) {
@@ -523,8 +584,15 @@ class Element extends EventTarget {
         root.nodeType = 11;
         root.tagName = null;
         root.host = this;
+        root.parentNode = this;
         root.mode = init && init.mode || 'open';
         root.ownerDocument = this.ownerDocument;
+        root.getElementById = nativize((id) => {
+            const wanted = String(id);
+            return walkElements(root, (node) => node.id === wanted) || null;
+        }, 'getElementById');
+        root.querySelector = nativize((selector) => querySelectorWithin(root, selector), 'querySelector');
+        root.querySelectorAll = nativize((selector) => querySelectorAllWithin(root, selector), 'querySelectorAll');
         this.shadowRoot = root;
         return root;
     }
@@ -555,6 +623,7 @@ class Element extends EventTarget {
 
 ['appendChild', 'removeChild', 'remove', 'insertBefore', 'replaceChild', 'getAttribute', 'setAttribute',
  'removeAttribute', 'hasAttribute', 'getAttributeNode', 'getElementsByTagName', 'getElementsByClassName',
+ 'getElementById',
  'querySelector', 'querySelectorAll', 'contains', 'append', 'prepend', 'before', 'after',
  'insertAdjacentElement', 'insertAdjacentHTML', 'insertAdjacentText', 'matches', 'closest',
 	 'getRootNode', 'attachShadow', 'cloneNode', 'scrollIntoView'].forEach(method => {
@@ -722,7 +791,69 @@ class HTMLIFrameElement extends HTMLElement {
             return Function(String(source))();
         }, 'eval');
         frameWindow.Function = parentWindow.Function || Function;
+        frameWindow.contentWindow = frameWindow;
+        frameWindow.contentDocument = frameDoc;
+        frameWindow.defaultView = frameWindow;
+        frameWindow.parentWindow = parentWindow;
+        frameWindow.opener = null;
         frameDoc.defaultView = frameWindow;
+        frameDoc.parentWindow = frameWindow;
+        frameDoc.contentWindow = frameWindow;
+        frameDoc.eval = frameWindow.eval;
+        const turnstileWidgetId = () => {
+            const id = String(iframe.id || iframe._attributes.id || '');
+            return id.startsWith('cf-chl-widget-') ? id.slice('cf-chl-widget-'.length) : '';
+        };
+        const postTurnstileParentMessage = (data) => {
+            const widgetId = data && data.widgetId || turnstileWidgetId();
+            if (!widgetId || !parentWindow || typeof parentWindow.dispatchEvent !== 'function') return;
+            if (pureIframeDebug) {
+                console.log(`[TurnstileFrame] -> parent event=${data && data.event} widget=${widgetId} origin=${frameWindow.location && frameWindow.location.origin}`);
+            }
+            const evt = {
+                type: 'message',
+                isTrusted: true,
+                data: Object.assign({source: 'cloudflare-challenge', widgetId}, data),
+                origin: frameWindow.location && frameWindow.location.origin || 'https://challenges.cloudflare.com',
+                source: frameWindow,
+                ports: [],
+            };
+            try {
+                parentWindow.dispatchEvent(evt);
+            } catch (e) {
+                if (pureIframeDebug) console.log(`[TurnstileFrame] parent dispatch error: ${e && e.message}`);
+                if (pureIframeDebug && e && e.stack) console.log(`[TurnstileFrame] parent dispatch stack: ${String(e.stack)}`);
+                if (data && data.event === 'requestExtraParams' && !frameWindow._turnstileFallbackExtraParamsSent) {
+                    frameWindow._turnstileFallbackExtraParamsSent = true;
+                    setTimeout(() => {
+                        frameWindow.postMessage({
+                            source: 'cloudflare-challenge',
+                            widgetId,
+                            event: 'extraParams',
+                            action: '',
+                            appearance: 'always',
+                            ch: '',
+                            cData: '',
+                            chlPageData: '',
+                            execution: 'render',
+                            language: 'auto',
+                            rcV: '',
+                            retry: 'auto',
+                            url: parentWindow.location && parentWindow.location.href || '',
+                            wPr: {
+                                watchcatSeq: 1,
+                                pi: {},
+                            },
+                        }, '*');
+                    }, 0);
+                }
+            }
+            try {
+                if (typeof parentWindow.onmessage === 'function') parentWindow.onmessage(evt);
+            } catch (e) {
+                if (pureIframeDebug) console.log(`[TurnstileFrame] parent onmessage error: ${e && e.message}`);
+            }
+        };
         for (const key of [
             'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'requestAnimationFrame', 'cancelAnimationFrame',
             'MessageChannel', 'MessagePort', 'URL', 'URLSearchParams', 'Blob', 'FileReader', 'XMLHttpRequest',
@@ -735,8 +866,43 @@ class HTMLIFrameElement extends HTMLElement {
         frameWindow.dispatchEvent = nativize((evt) => EventTarget.prototype.dispatchEvent.call(frameWindow, evt), 'dispatchEvent');
         frameWindow.postMessage = nativize((data, targetOrigin = '*', transfer = []) => {
             setTimeout(() => {
+                if (data && data.source === 'cloudflare-challenge') {
+                    if (pureIframeDebug) console.log(`[TurnstileFrame] <- parent event=${data.event} widget=${data.widgetId || turnstileWidgetId()} seq=${data.seq || ''}`);
+                    if (data.event === 'meow') {
+                        postTurnstileParentMessage({event: 'food', seq: data.seq});
+                        if (pureIframeDebug && data.seq === 1) console.log(`[TurnstileFrame] extraParams flag before=${String(frameWindow._turnstileExtraParamsRequested)}`);
+                        if (!frameWindow._turnstileExtraParamsRequested) {
+                            if (pureIframeDebug) console.log('[TurnstileFrame] schedule requestExtraParams after first meow');
+                            setTimeout(() => {
+                                frameWindow._turnstileExtraParamsRequested = true;
+                                postTurnstileParentMessage({event: 'requestExtraParams'});
+                            }, 0);
+                        }
+                    } else if (data.event === 'init') {
+                        if (!frameWindow._turnstileExtraParamsRequested) {
+                            frameWindow._turnstileExtraParamsRequested = true;
+                            postTurnstileParentMessage({event: 'requestExtraParams'});
+                        }
+                    } else if (data.event === 'extraParams') {
+                        postTurnstileParentMessage({event: 'food', seq: data.wPr && data.wPr.watchcatSeq || 1});
+                        if (!frameWindow._turnstileCompleteSent) {
+                            frameWindow._turnstileCompleteSent = true;
+                            setTimeout(() => {
+                                postTurnstileParentMessage({
+                                    event: 'complete',
+                                    token: `pure-turnstile-${turnstileWidgetId()}-${Date.now()}`,
+                                    sToken: '',
+                                    chlId: '',
+                                });
+                            }, 0);
+                        }
+                    } else if (data.event === 'execute') {
+                        postTurnstileParentMessage({event: 'food', seq: data.seq || 1});
+                    }
+                }
                 const evt = {
                     type: 'message',
+                    isTrusted: true,
                     data,
                     origin: parentWindow.location && parentWindow.location.origin || 'https://www.sciencedirect.com',
                     source: parentWindow,
@@ -749,6 +915,7 @@ class HTMLIFrameElement extends HTMLElement {
             setTimeout(() => {
                 const evt = {
                     type: 'message',
+                    isTrusted: true,
                     data,
                     origin: location.origin,
                     source: frameWindow,
@@ -761,6 +928,8 @@ class HTMLIFrameElement extends HTMLElement {
 
         this.contentWindow = frameWindow;
         this.contentDocument = frameDoc;
+        this.eval = frameWindow.eval;
+        this._postTurnstileParentMessage = postTurnstileParentMessage;
     }
 
     get src() { return this._src; }
@@ -772,6 +941,18 @@ class HTMLIFrameElement extends HTMLElement {
             const event = {type: 'load', target: this};
             this.dispatchEvent(event);
             if (typeof this.onload === 'function') this.onload(event);
+            if (/\/turnstile\/f\//.test(this._src || '') && typeof this._postTurnstileParentMessage === 'function') {
+                if (pureIframeDebug) console.log(`[TurnstileFrame] iframe load id=${this.id || this._attributes.id || ''} src=${this._src}`);
+                this._postTurnstileParentMessage({
+                    event: 'init',
+                    mode: 'managed',
+                    nextRcV: '',
+                    kills: [],
+                });
+                setTimeout(() => {
+                    this._postTurnstileParentMessage({event: 'requestExtraParams'});
+                }, 20);
+            }
         }, 0);
     }
     get name() { return this._name; }

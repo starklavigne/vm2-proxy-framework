@@ -75,6 +75,17 @@ class Document {
             return null;
         };
 
+        const findByIdAndTag = (node, id, tagName) => {
+            if (node.id === id && node.tagName === tagName) return node;
+            if (node._children) {
+                for (const child of node._children) {
+                    const res = findByIdAndTag(child, id, tagName);
+                    if (res) return res;
+                }
+            }
+            return null;
+        };
+
         const traverseByTag = (node, tag, result) => {
             if (node.nodeType === 1) {
                 if (tag === '*' || node.tagName === tag) result.push(node);
@@ -95,6 +106,11 @@ class Document {
         this.getElementById = nativize((id) => {
             const found = findById(this.documentElement, id);
             if (found) return found;
+            if (/^cf-chl-widget-.+-fr$/.test(String(id))) {
+                const baseId = String(id).slice(0, -3);
+                const frame = findByIdAndTag(this.documentElement, baseId, 'IFRAME') || findById(this.documentElement, baseId);
+                if (frame) return frame;
+            }
             // 自动创建常见 CF 挑战页面容器
             const knownIds = ['challenge-form','cf-challenge-form','cf-challenge-body',
                 'cf-challenge-running','cf-chl-widget','ctp-checkbox','jklY6',
