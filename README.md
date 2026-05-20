@@ -150,6 +150,65 @@ VMRunner (src/runner/VMRunner.js)
     - setContext 方法将伪造的 window 对象平铺到沙箱全局。
 ```
 
+## 🔬 Payload 对账工作流
+
+当 VM 跑完没拿到 `cf_clearance` 时，先用对账工具定位"VM 在哪一步偏离了真浏览器"，
+再决定要补指纹、补事件、还是补算法。
+
+### 依赖
+
+两个 capture 脚本用 [**patchright**](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright)（Playwright 的反检测分叉），原生 Playwright 会被 CF 直接识破：
+
+```bash
+pip install patchright
+# 二选一：
+#   方案 1：用系统装的真 Chrome（脚本默认 --channel chrome，最稳）
+#   方案 2：让 patchright 装它自己的补丁 chromium，并加 --channel ''
+patchright install chromium
+```
+
+### 四步顺序
+
+1. **抓最新 challenge 资产**
+   ```bash
+   python capture_challenge_playwright.py
+   # 写出 src/config/cfConfig.js 和 target/target.js
+   ```
+
+2. **真浏览器解一遍 challenge，dump 到 `dumps/real/`**
+   ```bash
+   python capture_payloads_playwright.py --clear-dir
+   # 默认非 headless，便于观察；拿到 cf_clearance 后 +3s 自动退出
+   # 同时写出 dumps/real/_cookies.json，包含完整的 cookie 集
+   ```
+
+3. **VM 跑一遍 challenge，dump 到 `dumps/vm/`**
+   ```bash
+   PURE_TURNSTILE=1 node main.js
+   # 启动时会自动清空 dumps/vm/；若需保留旧 dump 加 CLEAR_DUMP_DIR=0
+   ```
+
+4. **生成 diff 报告**
+   ```bash
+   python tools/diff_challenge_payloads.py --out report.txt
+   ```
+
+报告会按 endpoint 配对、列出长度/sha256/JSON 结构/二进制 hex 差异。
+
+**核心诊断信号**：
+
+- 摘要表里 `VM 没跑到这里`，说明执行流在某一步报错或挂起，**先解执行流**再谈算法
+- `RESP : status real=200 vm=403`，说明 VM 的请求被 CF 直接判掉
+- JSON diff 里指纹字段出现差异，说明对应的 env mock 不真（比如 canvas/audio/screen）
+
+**当前已知短板**（解释为什么 cf_clearance 拿不到）：
+
+- `turnstile.execute()` callback 返的是占位 token（`main.js:1199`），CF 服务端必然拒
+- `node-fetch` 的 TLS JA3 跟 Chrome 完全不同，TLS 层就可能被识别
+- 鼠标事件是定时器塞的、轨迹太规则（`main.js:1258`）
+
+对账工具不解决以上问题，但能告诉你**哪一项最先击穿**——是 TLS、是 token、还是某个指纹字段。
+
 ## ⚠️ 免责声明 (Disclaimer)
 
 1. VM2 安全性：vm2 库存在已知的沙箱逃逸漏洞，且已停止维护。本框架仅供本地逆向分析、研究和学习使用，严禁在生产环境或对外提供服务的接口中使用，否则可能导致服务器被入侵。

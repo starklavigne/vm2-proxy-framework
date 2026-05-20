@@ -18,6 +18,18 @@ const {nativize, cookieJar} = require('./src/utils/tools');
 const pureTurnstileMode = process.env.PURE_TURNSTILE === '1';
 const pureStateDebug = process.env.PURE_STATE_DEBUG === '1';
 
+const challengeDumpDir = process.env.CHALLENGE_DUMP_DIR
+    || path.resolve(__dirname, 'dumps/vm');
+if (process.env.CLEAR_DUMP_DIR !== '0') {
+    try { fs.rmSync(challengeDumpDir, {recursive: true, force: true}); } catch (e) {}
+}
+try {
+    fs.mkdirSync(challengeDumpDir, {recursive: true});
+    console.log(`[Dump] CF challenge dump dir: ${challengeDumpDir}`);
+} catch (e) {
+    console.log(`[Dump] 创建 dump 目录失败 ${challengeDumpDir}: ${e.message}`);
+}
+
 const importCookieFile = () => {
     const cookiePath = path.join(__dirname, 'src/config/cfCookies.json');
     if (!fs.existsSync(cookiePath)) return;
@@ -611,7 +623,7 @@ rawWindow.location = {
 // 应用插件，把它们挂载到 context 和 rawWindow 上
 useAsyncPlugin(context, rawWindow);
 useBrowserPlugin(context, rawWindow, profile);
-useNetworkPlugin(context, rawWindow, profile);
+useNetworkPlugin(context, rawWindow, profile, {dumpDir: challengeDumpDir});
 
 // vm2 顶层 this 指向 sandbox，本项目的目标脚本会用 this/self 做全局对象。
 // 所以除了 window，也要把核心 BOM 能力同步到 sandbox 顶层。
