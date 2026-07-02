@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+.DS_Store
+.idea/
+
+# Payload 对账 dump
+dumps/
+report.txt

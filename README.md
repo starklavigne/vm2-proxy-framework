@@ -184,7 +184,7 @@ patchright install chromium
 
 3. **VM 跑一遍 challenge，dump 到 `dumps/vm/`**
    ```bash
-   PURE_TURNSTILE=1 node main.js
+   node main.js
    # 启动时会自动清空 dumps/vm/；若需保留旧 dump 加 CLEAR_DUMP_DIR=0
    ```
 
@@ -203,11 +203,76 @@ patchright install chromium
 
 **当前已知短板**（解释为什么 cf_clearance 拿不到）：
 
-- `turnstile.execute()` callback 返的是占位 token（`main.js:1199`），CF 服务端必然拒
-- `node-fetch` 的 TLS JA3 跟 Chrome 完全不同，TLS 层就可能被识别
-- 鼠标事件是定时器塞的、轨迹太规则（`main.js:1258`）
+- `turnstile.execute()` callback 返的是占位 token（默认 `turnstileMock`），CF 服务端必然拒——有效 token 需要真实 Turnstile 与 CF 服务端交互
+- `node-fetch` 的 TLS JA3 跟 Chrome 完全不同，TLS 层就可能被识别（建议换 tls-client / curl-impersonate）
+- 鼠标事件是定时器塞的、轨迹太规则
+- `crypto.subtle` 之前是 stub（digest 返回全 0），现已接 Node 真实 webcrypto
+- ~~曾尝试把真实 Turnstile 拉到 Node 宿主域执行（PURE_TURNSTILE / executeTurnstileInHostRealm）~~ 已移除：背离纯沙箱、且 token 仍被拒
 
 对账工具不解决以上问题，但能告诉你**哪一项最先击穿**——是 TLS、是 token、还是某个指纹字段。
+
+## 🧪 新执行层：node:vm + jsdom（迁移中）
+
+vm2 已停维护且有逃逸，手搓 DOM 永远在"缺什么补什么"且自相矛盾（曾有两套 Navigator）。
+新执行层用 **jsdom** 提供自洽的 DOM/CSSOM，复用现有 `NetworkPlugin`（fetch/XHR/cookie/dump）
+和已修好的 `Crypto`（`subtle` 接真 webcrypto），让 challenge 能跑到底，从而在 dumps 里看清它算了什么。
+
+新增文件：
+- `src/runner/JsdomRunner.js` — jsdom 宿主 + navigator/screen/chrome 指纹覆盖 + 真实 crypto + 网络复用 + 可选 native 指纹后端
+- `main.jsdom.js` — 驱动：注入 `_cf_chl_opt`、跑 `target/target.js`、监听 `cf_clearance`
+- `tools/preflight_deps.js` — 依赖自检
+
+安装与运行：
+```bash
+npm install jsdom node-fetch
+npm install canvas gl web-audio-api   # native，可选；缺了对应指纹退回 stub
+# macOS 上 canvas 需要: brew install pkg-config cairo pango libpng jpeg giflib librsvg
+npm run preflight     # 看哪些后端就绪
+npm run jsdom         # 跑 jsdom 版（dump 仍写 dumps/vm，可与 dumps/real 对账）
+```
+
+**已冒烟通过**：jsdom 窗口构建、navigator(`webdriver=false`/UA/platform)/screen/chrome 覆盖、
+`TextEncoder/TextDecoder` 注入、`crypto.subtle.digest` 真实非 0、fetch/XHR 就位、自洽 DOM；
+`target.js` 已能在 jsdom 里执行不抛错。
+
+### 主线进展（实测，截至当前）
+
+跑 `npm run jsdom`（本机无外网时会停在网络边界），`target.js`（orchestrate）已被驱动到：
+注册 error/DCL/load 监听 → 1s 看门狗 → `setTimeout(0)` 里 **open 了真正的 ov1 flow POST**
+（`/cdn-cgi/challenge-platform/h/g/b/ov1/375771525:...`，与真机 `dumps/real` 同端点）。
+
+为打通到这一步，已补齐这些"第一个缺口"（都在 `JsdomRunner` 里，按发现顺序）：
+1. **VirtualConsole/jsdomError** —— jsdom 把 timer/事件回调里的异常吞掉，只发到这里。
+   这是看见"被吞错误"的唯一窗口，是后续定位的关键工具。
+2. **Web Worker shim**（`installWorkerShim`）—— orchestrate 把 PoW/指纹 offload 到
+   `new Worker(URL.createObjectURL(new Blob([src])))` 再 await `worker.onmessage` 才发 ov1。
+   jsdom 不实现 Worker → 那个 await 永不返回。shim 同实例 postMessage 桥接 + 真实 crypto，
+   已用玩具 worker（echo + subtle.digest）单测通过。
+3. **缺失构造器**（`installMissingConstructors`）—— 补了 35 个 jsdom 缺、真 Chrome 必有的
+   构造器（WebGL*/OffscreenCanvas/RTC*/各 Observer/ImageData…），CF 指纹会读它们的 `.prototype`。
+
+### 当前卡点（精确到偏移，可复现）
+
+`[Cloudflare Turnstile] Unhandled error: Cannot read properties of undefined (reading 'prototype')`
+—— 内联 Turnstile 采集器在 `target.js` 偏移 **41710**（函数 `zJ`）做了个**无 try 保护**的特征检测：
+`N[X].prototype[Y]`，其中 `N[X]` 是个 jsdom 仍缺、且不在上面 35 个里的构造器（名字由 `mu()`
+运行时解码，需联机插桩才能确认是哪个）。
+
+**继续这个循环的方法**（每轮约补一个 API）：
+1. `node -e "setTimeout(()=>process.exit(0),4000); require('./main.jsdom.js')" 2>&1 | grep -A12 jsdomError`
+   拿到栈里的 `<anonymous>:1:OFFSET`；
+2. 在 `target/target.js` 该偏移附近看是哪个 `N[X]` / API；
+3. 在 `JsdomRunner` 对应 `install*` 里补上；回到 1。
+
+### 仍需联机（本机沙箱到不了 CF，无法验证）
+
+- ov1 真正 `send` 后才会写 `dumps/vm`，再和 `dumps/real` 跑 `tools/diff_challenge_payloads.py` 对账；
+- turnstile 外链脚本、`/flow` 响应、turnstile token —— 都要真出网；
+- **turnstile token 仍是核心死结**：jsdom 渲染不了真实 widget，`isTrusted` 也伪造不了（和 vm2 同病）。
+  这部分要么真机采样喂 ground truth（route 4），要么深逆 turnstile（route 5）。
+
+**Canvas/WebGL 取舍**：node-canvas 是 Cairo、headless-gl 多为 Mesa/ANGLE，hash 不会等于某台真 Chrome，
+但是真实、稳定、自洽的值（强于全 0/常量）。严格模式要比对 Chrome 分布时，需用真机采样锚定。
 
 ## ⚠️ 免责声明 (Disclaimer)
 

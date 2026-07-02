@@ -15,8 +15,6 @@ const cfConfig = require('./src/config/cfConfig'); // 独立的 CF 配置
 // Utils
 const {nativize, cookieJar} = require('./src/utils/tools');
 
-const pureTurnstileMode = process.env.PURE_TURNSTILE === '1';
-const pureStateDebug = process.env.PURE_STATE_DEBUG === '1';
 
 const challengeDumpDir = process.env.CHALLENGE_DUMP_DIR
     || path.resolve(__dirname, 'dumps/vm');
@@ -44,11 +42,7 @@ const importCookieFile = () => {
         console.log(`[Cookie] 导入浏览器 cookie 失败: ${e.message}`);
     }
 };
-if (pureTurnstileMode) {
-    console.log('[Cookie] PURE_TURNSTILE=1，跳过浏览器 cookie 导入');
-} else {
-    importCookieFile();
-}
+importCookieFile();
 const startupClearance = cookieJar.cookies && cookieJar.cookies.get('cf_clearance');
 let reportedStartupClearance = false;
 
@@ -754,67 +748,10 @@ const orchestratePattern = /cdn-cgi\/challenge-platform\/h\/b\/orchestrate/;
 const loadedScripts = new Set();
 
 const isTurnstileScript = (url) => /challenges\.cloudflare\.com\/turnstile\//.test(String(url || ''));
-let pendingTurnstileOnloadName = null;
-let pendingTurnstileInitialOnloadCallback = null;
-let pendingTurnstileStateSnapshot = null;
-let pendingTurnstileOnloadSince = 0;
-const invokedTurnstileOnloads = new WeakSet();
-let turnstileRenderSeen = false;
-let turnstileOnloadReplayCount = 0;
-let turnstileOnloadLastReplay = 0;
-
-const executeTurnstileInHostRealm = (source, finalUrl) => {
-    const safeUrl = String(finalUrl || 'turnstile-host.js').replace(/[\r\n]/g, '');
-    if (pureTurnstileMode && isTurnstileScript(finalUrl)) {
-        const guardExpr = (label, expr, fallback) =>
-            `(function(){try{return ${expr}}catch(e){console.log("[TurnstileGuard] ${label}: "+(e&&e.message));return ${fallback}}})()`;
-        source = source
-            .replace('"ht.atrs":o(document.body.parentNode)', `"ht.atrs":${guardExpr('ht.atrs', 'o(document.body.parentNode)', '[]')}`)
-            .replace('ffp:ia(r.wrapper)', `ffp:${guardExpr('ffp', 'ia(r.wrapper)', '""')}`)
-            .replace('pfp:oa(document,Fr,Dr)', `pfp:${guardExpr('pfp', 'oa(document,Fr,Dr)', '""')}`)
-            .replace('wp:na(r.wrapper)', `wp:${guardExpr('wp', 'na(r.wrapper)', '""')}`)
-            .replace('xp:aa(r.wrapper).slice(0,Wr)', `xp:${guardExpr('xp', 'aa(r.wrapper).slice(0,Wr)', '""')}`);
-    }
-    const hostIntrinsicNames = [
-        'Object', 'Function', 'Array', 'String', 'Number', 'Boolean', 'RegExp',
-        'Date', 'Math', 'JSON', 'Promise', 'Symbol', 'Reflect', 'Proxy',
-        'WeakMap', 'WeakSet', 'Map', 'Set', 'DataView', 'ArrayBuffer',
-        'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array',
-        'Float32Array', 'Float64Array', 'Uint8ClampedArray',
-        'Error', 'TypeError', 'EvalError', 'RangeError', 'ReferenceError',
-        'SyntaxError', 'URIError', 'parseInt', 'parseFloat', 'isNaN', 'isFinite',
-        'encodeURI', 'decodeURI', 'encodeURIComponent', 'decodeURIComponent',
-        'escape', 'unescape', 'URLSearchParams', 'TextEncoder', 'TextDecoder'
-    ];
-    for (const name of hostIntrinsicNames) {
-        if (globalThis[name]) rawWindow[name] = globalThis[name];
-    }
-    const wrapped = `
-        var window = arguments[0];
-        var self = window;
-        var globalThis = window;
-        var document = arguments[1];
-        var location = arguments[2];
-        var navigator = arguments[3];
-        var process = undefined;
-        var require = undefined;
-        var module = undefined;
-        var exports = undefined;
-        var Buffer = undefined;
-        var global = window;
-        with (window) {
-            ${source}
-        }
-        //# sourceURL=${safeUrl}
-    `;
-    const fn = new Function(wrapped);
-    fn.call(proxyWindow, proxyWindow, proxyDocument, rawWindow.location, rawWindow.navigator);
-};
 
 const triggerScriptReady = (scriptEl, finalUrl, reason) => {
     if (reason) console.log(`[ScriptLoader] ${reason}`);
-    const isTurnstile = isTurnstileScript(finalUrl);
-    if (!(pureTurnstileMode && isTurnstile) && scriptEl && typeof scriptEl.onload === 'function') {
+    if (scriptEl && typeof scriptEl.onload === 'function') {
         try { scriptEl.onload(); } catch (e) {}
     }
 
@@ -823,30 +760,10 @@ const triggerScriptReady = (scriptEl, finalUrl, reason) => {
 
     const cbName = decodeURIComponent(onloadMatch[1]);
     console.log(`[ScriptLoader] 触发 Turnstile onload 回调: ${cbName}`);
-    if (isTurnstile) pendingTurnstileOnloadName = cbName;
-    if (pureTurnstileMode && isTurnstile) {
-        const cb = rawWindow[cbName] || context[cbName];
-        pendingTurnstileInitialOnloadCallback = typeof cb === 'function' ? cb : null;
-        pendingTurnstileOnloadSince = Date.now();
-        pendingTurnstileStateSnapshot = new Map();
-        for (const source of [rawWindow, context]) {
-            for (const key of Reflect.ownKeys(source)) {
-                if (typeof key !== 'string' || pendingTurnstileStateSnapshot.has(key)) continue;
-                pendingTurnstileStateSnapshot.set(key, Object.prototype.hasOwnProperty.call(source, key) ? source[key] : undefined);
-            }
-        }
-        console.log(`[ScriptLoader] PURE_TURNSTILE: 延后 onload，当前回调类型: ${typeof cb}`);
-        return;
-    }
     try {
         const cb = rawWindow[cbName] || context[cbName];
         console.log(`[ScriptLoader] onload 回调类型: ${typeof cb}`);
-        if (typeof cb === 'function') {
-            invokedTurnstileOnloads.add(cb);
-            turnstileOnloadReplayCount++;
-            turnstileOnloadLastReplay = Date.now();
-            cb();
-        }
+        if (typeof cb === 'function') cb();
         else console.log(`[ScriptLoader] onload 回调不存在: ${cbName}`);
     } catch (e) {
         console.log(`[ScriptLoader] 回调执行失败: ${e.message}`);
@@ -854,149 +771,8 @@ const triggerScriptReady = (scriptEl, finalUrl, reason) => {
     }
 };
 
-const installTurnstileProbe = () => {
-    const ts = rawWindow.turnstile || context.turnstile;
-    if (!ts || ts.__pureProbeInstalled) return;
-    Object.defineProperty(ts, '__pureProbeInstalled', {value: true, configurable: true});
-    const keys = Object.keys(ts).join(', ');
-    console.log(`[TurnstileProbe] real API keys: ${keys}`);
-    for (const name of ['render', 'execute', 'reset', 'remove', 'getResponse', 'ready']) {
-        if (typeof ts[name] !== 'function') continue;
-        const original = ts[name];
-        ts[name] = function(...args) {
-            const first = args[0];
-            const second = args[1];
-            const sitekey = second && second.sitekey;
-            console.log(`[TurnstileProbe] ${name}(${first && first.tagName || typeof first}, sitekey=${sitekey || ''})`);
-            try {
-                if (name === 'render') turnstileRenderSeen = true;
-                const ret = original.apply(this, args);
-                console.log(`[TurnstileProbe] ${name} -> ${ret}`);
-                return ret;
-            } catch (e) {
-                console.log(`[TurnstileProbe] ${name} throw: ${e.message}`);
-                if (e.stack) console.log(`[TurnstileProbe] stack: ${String(e.stack).split('\n').slice(0, 8).join(' | ')}`);
-                throw e;
-            }
-        };
-    }
-};
 
-if (pureTurnstileMode) {
-    const derivePureGlobalKeys = () => {
-        const fallback = ['rLIi5', 'fAJq8', 'Bccyw0', 'UJYG7', 'RuXv0', 'qOQn5', 'GViAi4', 'Zrha9', 'dKdZ9'];
-        try {
-            const source = fs.readFileSync(path.join(__dirname, 'target/target.js'), 'utf8');
-            const match = source.match(/['"](_cf_chl_opt;_cf_chl_state;[^'"]+)['"]\.split\(['"];\s*['"]\)/);
-            if (!match) return fallback;
-            return match[1]
-                .split(';')
-                .filter((key) => key && !key.startsWith('_cf_'))
-                .filter((key) => key !== 'puQFi0' && key !== 'frameElement')
-                .slice(0, 24);
-        } catch (e) {
-            return fallback;
-        }
-    };
-    const pureGlobalKeys = derivePureGlobalKeys();
-    const ownValue = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined;
-    const globalValue = (key) => {
-        const rawVal = ownValue(rawWindow, key);
-        if (rawVal !== undefined) return rawVal;
-        return ownValue(context, key);
-    };
-    const dumpPureState = (label) => {
-        const keys = pureGlobalKeys;
-        const state = keys.map((key) => {
-            const val = globalValue(key);
-            const type = typeof val;
-            const text = type === 'function' ? 'function' : type === 'object' && val ? (val.tagName || val.constructor && val.constructor.name || 'object') : String(val);
-            return `${key}:${type}:${text}`;
-        }).join(' | ');
-        console.log(`[PureState:${label}] ${state}`);
-    };
-	    const onloadReplay = setInterval(() => {
-	        if (turnstileRenderSeen || turnstileOnloadReplayCount >= 12) return;
-	        if (!pendingTurnstileOnloadName) return;
-	        if (ownValue(rawWindow, 'Bccyw0') === true || ownValue(context, 'Bccyw0') === true) {
-	            if (turnstileOnloadReplayCount === 0) dumpPureState('skip-replay-already-initialized');
-	            turnstileOnloadReplayCount = 12;
-	            return;
-        }
-        const cb = globalValue(pendingTurnstileOnloadName);
-        if (typeof cb !== 'function') return;
-        if (invokedTurnstileOnloads.has(cb)) {
-            turnstileOnloadReplayCount = 12;
-            return;
-        }
-        const callbackReplaced = pendingTurnstileInitialOnloadCallback && cb !== pendingTurnstileInitialOnloadCallback;
-        const hasChallengeState = callbackReplaced || pureGlobalKeys.some((key) => {
-            if (key === pendingTurnstileOnloadName) return false;
-            const val = globalValue(key);
-            const oldVal = pendingTurnstileStateSnapshot && pendingTurnstileStateSnapshot.has(key)
-                ? pendingTurnstileStateSnapshot.get(key)
-                : undefined;
-            return val !== oldVal && val !== undefined && val !== '' &&
-                typeof val !== 'function' && typeof val !== 'boolean';
-        });
-        if (!hasChallengeState) {
-            if (pendingTurnstileOnloadSince && Date.now() - pendingTurnstileOnloadSince > 8000) {
-                dumpPureState('wait-challenge-state-timeout');
-                console.log('[ScriptLoader] PURE_TURNSTILE: 等待挑战状态超时，停止 onload 重放等待');
-                turnstileOnloadReplayCount = 12;
-                return;
-            }
-            if (pureStateDebug && turnstileOnloadReplayCount === 0 && Date.now() - turnstileOnloadLastReplay > 1000) {
-                dumpPureState('wait-challenge-state');
-                turnstileOnloadLastReplay = Date.now();
-            }
-            return;
-        }
-        if (Date.now() - turnstileOnloadLastReplay < 1000) return;
-        if (turnstileOnloadReplayCount === 0) {
-            for (const key of ['fAJq8', 'Bccyw0', 'wzzNi2', 'TMvR3']) {
-                delete rawWindow[key];
-                delete context[key];
-            }
-        }
-        dumpPureState(`before-replay-${turnstileOnloadReplayCount + 1}`);
-        console.log(`[ScriptLoader] PURE_TURNSTILE: 重放 onload 回调 ${pendingTurnstileOnloadName}`);
-        invokedTurnstileOnloads.add(cb);
-        turnstileOnloadReplayCount++;
-        turnstileOnloadLastReplay = Date.now();
-        try {
-            cb();
-        } catch (e) {
-            console.log(`[ScriptLoader] PURE_TURNSTILE onload 重放失败: ${e.message}`);
-            if (e.stack) console.log(`[ScriptLoader] PURE_TURNSTILE onload stack: ${String(e.stack).split('\n').slice(0, 10).join(' | ')}`);
-        }
-        dumpPureState(`after-replay-${turnstileOnloadReplayCount}`);
-    }, 250);
-    onloadReplay.unref && onloadReplay.unref();
-}
 
-const tryExecuteLocalTurnstile = (scriptEl, finalUrl, reason) => {
-    if (!pureTurnstileMode || !isTurnstileScript(finalUrl)) return false;
-    const localTurnstilePath = path.join(__dirname, 'target/turnstile-api.js');
-    if (!fs.existsSync(localTurnstilePath)) return false;
-    try {
-        const text = fs.readFileSync(localTurnstilePath, 'utf8');
-        console.log(`[ScriptLoader] ${reason}，改用本地真实 Turnstile: ${localTurnstilePath}`);
-        delete rawWindow.turnstile;
-        delete context.turnstile;
-        activeExternalScript = scriptEl || null;
-        executeTurnstileInHostRealm(text, finalUrl);
-        installTurnstileProbe();
-        triggerScriptReady(scriptEl, finalUrl, 'PURE_TURNSTILE: 本地真实脚本执行完成');
-        return true;
-    } catch (e) {
-        console.log(`[ScriptLoader] 本地 Turnstile 执行失败: ${e.message}`);
-        if (e.stack) console.log(`[ScriptLoader] 本地 Turnstile stack: ${String(e.stack).split('\n').slice(0, 8).join(' | ')}`);
-        return false;
-    } finally {
-        activeExternalScript = null;
-    }
-};
 
 // 异步抓取并在 VM 中执行外链脚本
 const loadExternalScript = (scriptEl) => {
@@ -1031,7 +807,6 @@ const loadExternalScript = (scriptEl) => {
         if (!resp.ok) {
             console.log(`[ScriptLoader] 响应 ${resp.status}，跳过执行: ${finalUrl.substring(0, 80)}`);
             if (isTurnstileScript(finalUrl)) {
-                if (tryExecuteLocalTurnstile(scriptEl, finalUrl, `Turnstile 响应 ${resp.status}`)) return;
                 triggerScriptReady(scriptEl, finalUrl, 'Turnstile 使用本地 mock 继续');
                 return;
             }
@@ -1040,25 +815,6 @@ const loadExternalScript = (scriptEl) => {
         }
         console.log(`[ScriptLoader] 执行 ${text.length} 字节: ${finalUrl.substring(0, 80)}`);
         if (scriptEl) scriptEl.src = finalUrl;
-        if (pureTurnstileMode && isTurnstileScript(finalUrl)) {
-            try {
-                console.log('[ScriptLoader] PURE_TURNSTILE: 尝试 host realm 执行 Turnstile...');
-                delete rawWindow.turnstile;
-                delete context.turnstile;
-                activeExternalScript = scriptEl || null;
-                executeTurnstileInHostRealm(text, finalUrl);
-                installTurnstileProbe();
-                triggerScriptReady(scriptEl, finalUrl, 'PURE_TURNSTILE: host realm 执行完成');
-                return;
-            } catch (e) {
-                console.log(`[ScriptLoader] PURE_TURNSTILE host realm 失败: ${e.message}`);
-                if (e.stack) {
-                    console.log(`[ScriptLoader] PURE_TURNSTILE stack: ${String(e.stack).split('\n').slice(0, 10).join(' | ')}`);
-                }
-            } finally {
-                activeExternalScript = null;
-            }
-        }
         try {
             activeExternalScript = scriptEl || null;
             runner.vm.run(text);
@@ -1097,7 +853,6 @@ const loadExternalScript = (scriptEl) => {
     }).catch((err) => {
         console.log(`[ScriptLoader] 网络错误: ${err.message}`);
         if (isTurnstileScript(finalUrl)) {
-            if (tryExecuteLocalTurnstile(scriptEl, finalUrl, 'Turnstile 网络加载失败')) return;
             triggerScriptReady(scriptEl, finalUrl, 'Turnstile 网络加载失败，使用本地 mock 继续');
             return;
         }

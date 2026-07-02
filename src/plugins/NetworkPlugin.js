@@ -243,6 +243,11 @@ module.exports = function (context, rawWindow, profile, opts = {}) {
             if (this._url && this._url.startsWith('/')) {
                 this._url = `${new URL(context.location.href).origin}${this._url}`;
             }
+            // 非侵入观测点：challenge XHR 一旦 open 就打印（不改 this 的可检测特征）。
+            // 配合 send 日志可判断“open 了但没 send”这种卡点。
+            if (this._url.includes(CHALLENGE_URL_PATTERN)) {
+                console.log(`>>> [XHR] open ${method} ${this._url.slice(0, 90)}`);
+            }
             this.readyState = 1;
             if (this.onreadystatechange) this.onreadystatechange();
         }

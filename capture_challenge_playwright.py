@@ -19,16 +19,19 @@ except ImportError:
     )
     sys.exit(1)
 
-
 ROOT = Path(__file__).resolve().parent
 DEFAULT_URL = (
     "https://www.sciencedirect.com/science/article/pii/S2214914725004428"
     "?ref=cra_js_challenge&fr=RR-102&arc=HV-3&rr=9fa78124ca97c9fd"
 )
+# 与 src/config/browserProfile.js 的 userAgent 保持同一个 Chrome 身份。
+# 注意：capture 用的是系统真 Chrome（--channel chrome），强行覆盖 UA 会和真 Chrome
+# 自带的 sec-ch-ua 客户端提示对不上（真机 dump 里就出现过 UA=119 / sec-ch-ua=149 的矛盾）。
+# 若你的真 Chrome 本身就是这个大版本，建议直接传 --user-agent "" 让它用原生 UA。
 DEFAULT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/119.0.0.0 Safari/537.36"
+    "Chrome/149.0.0.0 Safari/537.36"
 )
 
 
@@ -124,18 +127,43 @@ def extract_ray_from_orchestrate_url(url):
     return match.group(1) if match else None
 
 
-def looks_like_article_challenge(url, status, body):
-    if status not in (403, 503):
-        return False
-    if "_cf_chl_opt" not in body:
-        return False
-    parsed = urlparse(url)
-    return parsed.netloc.endswith("sciencedirect.com") and "/science/article/pii/" in parsed.path
+def is_challenge_html(status, body):
+    # CF 的 JS/managed challenge 永远是带 _cf_chl_opt 的 403/503 文档，
+    # 不再绑定具体站点/路径，任意被 CF 拦的页面都能用这个脚本抓。
+    return status in (403, 503) and "_cf_chl_opt" in body
 
 
 def write_text(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def fetch_orchestrate_directly(context, state, args):
+    """用 403 HTML 里解析出的 script src 直接拉 orchestrate JS（网络监听漏掉时的兜底）。"""
+    if state["target_js"] is not None or not state["orchestrate_url"]:
+        return
+    try:
+        resp = context.request.get(
+            state["orchestrate_url"],
+            headers={
+                "Referer": state["cf_url"] or args.url,
+                "Accept": "*/*",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            },
+            timeout=args.goto_timeout,
+        )
+        body = resp.text()
+        if resp.ok and len(body) > 1000:
+            state["target_js"] = body
+            state["target_url"] = state["orchestrate_url"]
+            print("[hit] orchestrate JS (主动抓取)")
+            print(f"      url  : {state['target_url']}")
+            print(f"      size : {len(body)} bytes")
+        else:
+            print(f"[fail] 主动抓取 orchestrate 异常: {resp.status} size={len(body)}")
+    except Exception as exc:
+        print(f"[fail] 主动抓取 orchestrate 失败: {exc}")
 
 
 def capture(args):
@@ -147,6 +175,7 @@ def capture(args):
         "cf_config": None,
         "cf_url": None,
         "cf_ray": None,
+        "cf_seen_at": None,
         "target_js": None,
         "target_url": None,
         "html": None,
@@ -161,52 +190,55 @@ def capture(args):
         status = resp.status
 
         is_orchestrate = "/cdn-cgi/challenge-platform/" in url and "/orchestrate/chl_page/" in url
-        is_candidate_doc = (
-            url.startswith("https://www.sciencedirect.com/science/article/pii/")
-            or resp.request.resource_type == "document"
-        )
-
-        if not is_orchestrate and not is_candidate_doc:
+        is_doc = resp.request.resource_type == "document"
+        if not is_orchestrate and not is_doc:
             return
 
-        if is_orchestrate:
-            target_ray = extract_ray_from_orchestrate_url(url)
-            if state["cf_ray"] and target_ray == state["cf_ray"]:
-                state["orchestrate_url"] = url
-
-        try:
-            body = resp.text()
-        except Exception as exc:
-            print(f"[skip] 无法读取响应体 {status} {url[:120]}: {exc}")
-            return
-
-        if state["cf_config"] is None and looks_like_article_challenge(url, status, body):
-            obj = extract_cf_chl_opt(body)
-            if obj:
-                state["cf_config"] = f"module.exports = {obj};\n"
-                state["cf_url"] = url
-                state["cf_ray"] = extract_value(obj, "cRay")
-                state["html"] = body
-                state["orchestrate_url"] = extract_orchestrate_url(body, url)
-                ctype = extract_value(obj, "cType")
-                print("[hit] 403 HTML")
-                print(f"      url   : {url}")
-                print(f"      cRay  : {state['cf_ray'] or '-'}")
-                print(f"      cType : {ctype or '-'}")
-                if state["orchestrate_url"]:
-                    print(f"      script: {state['orchestrate_url']}")
-            return
-
-        if state["target_js"] is None and is_orchestrate and len(body) > 1000:
+        # 1) orchestrate JS：一次加载只有一个挑战，看到第一个 chl_page/v1 就拿，
+        #    不再用 cRay 硬卡（之前 reload 导致 ray 漂移，会把唯一的 orchestrate 跳过）。
+        if is_orchestrate and state["target_js"] is None:
+            try:
+                body = resp.text()
+            except Exception as exc:
+                print(f"[skip] 读取 orchestrate 失败 {url[:100]}: {exc}")
+                return
+            if len(body) <= 1000:
+                return
             target_ray = extract_ray_from_orchestrate_url(url)
             if state["cf_ray"] and target_ray and target_ray != state["cf_ray"]:
-                print(f"[skip] orchestrate ray 不匹配: {target_ray} != {state['cf_ray']}")
-                return
+                print(f"[warn] orchestrate ray={target_ray} 与 cRay={state['cf_ray']} 不一致，仍采用")
             state["target_js"] = body
             state["target_url"] = url
             print("[hit] orchestrate JS")
             print(f"      url  : {url}")
             print(f"      size : {len(body)} bytes")
+            return
+
+        # 2) 挑战 HTML：解析 window._cf_chl_opt
+        if is_doc and state["cf_config"] is None:
+            try:
+                body = resp.text()
+            except Exception as exc:
+                print(f"[skip] 读取文档失败 {status} {url[:100]}: {exc}")
+                return
+            if not is_challenge_html(status, body):
+                return
+            obj = extract_cf_chl_opt(body)
+            if not obj:
+                return
+            state["cf_config"] = f"module.exports = {obj};\n"
+            state["cf_url"] = url
+            state["cf_ray"] = extract_value(obj, "cRay")
+            state["cf_seen_at"] = time.time()
+            state["html"] = body
+            state["orchestrate_url"] = extract_orchestrate_url(body, url)
+            ctype = extract_value(obj, "cType")
+            print("[hit] challenge HTML")
+            print(f"      url   : {url}")
+            print(f"      cRay  : {state['cf_ray'] or '-'}")
+            print(f"      cType : {ctype or '-'}")
+            if state["orchestrate_url"]:
+                print(f"      script: {state['orchestrate_url']}")
 
     with sync_playwright() as p:
         launch_args = {}
@@ -228,15 +260,17 @@ def capture(args):
 
         try:
             print(f"[open] {args.url}")
+            # challenge 页面是个很小的 403 文档，domcontentloaded 基本是瞬时的；
+            # 内联脚本随即请求 orchestrate，由 on_response 抓到。不再 reload。
             page.goto(args.url, wait_until="domcontentloaded", timeout=args.goto_timeout)
         except PlaywrightTimeoutError:
-            print("[warn] 首次打开超时，继续等待网络响应")
+            print("[warn] 打开超时，继续等待网络响应")
         except Exception as exc:
-            print(f"[warn] 首次打开异常: {exc}")
+            print(f"[warn] 打开异常: {exc}")
 
         if args.reload:
             try:
-                print("[reload] 刷新页面以重新捕获 Network 响应")
+                print("[reload] 显式刷新（--reload）")
                 page.reload(wait_until="domcontentloaded", timeout=args.goto_timeout)
             except PlaywrightTimeoutError:
                 print("[warn] 刷新超时，继续等待网络响应")
@@ -245,34 +279,20 @@ def capture(args):
 
         deadline = time.time() + args.wait / 1000
         while time.time() < deadline and not maybe_done():
-            page.wait_for_timeout(250)
+            # 拿到了 cf_config 但 orchestrate 迟迟没从网络监听里出现：
+            # 等 settle 毫秒后主动抓一次，而不是干等到 deadline。
+            if (state["cf_config"] and state["orchestrate_url"]
+                    and state["target_js"] is None and state["cf_seen_at"]
+                    and (time.time() - state["cf_seen_at"]) * 1000 > args.settle):
+                print(f"[fetch] orchestrate 未在 {args.settle}ms 内出现，主动抓取")
+                fetch_orchestrate_directly(context, state, args)
+                if maybe_done():
+                    break
+            page.wait_for_timeout(100)
 
-        if state["cf_config"] and state["orchestrate_url"]:
-            target_ray = extract_ray_from_orchestrate_url(state["target_url"] or "")
-            if state["target_js"] is None or (state["cf_ray"] and target_ray != state["cf_ray"]):
-                print("[fetch] 用 403 HTML 中的 script src 主动获取配套 orchestrate JS")
-                try:
-                    resp = context.request.get(
-                        state["orchestrate_url"],
-                        headers={
-                            "Referer": state["cf_url"],
-                            "Accept": "*/*",
-                            "Cache-Control": "no-cache",
-                            "Pragma": "no-cache",
-                        },
-                        timeout=args.goto_timeout,
-                    )
-                    body = resp.text()
-                    if resp.ok and len(body) > 1000:
-                        state["target_js"] = body
-                        state["target_url"] = state["orchestrate_url"]
-                        print("[hit] paired orchestrate JS")
-                        print(f"      url  : {state['target_url']}")
-                        print(f"      size : {len(body)} bytes")
-                    else:
-                        print(f"[fail] 配套 orchestrate 响应异常: {resp.status} size={len(body)}")
-                except Exception as exc:
-                    print(f"[fail] 主动获取配套 orchestrate 失败: {exc}")
+        # 兜底：循环结束仍缺 orchestrate 就再主动抓一次
+        if state["cf_config"] and state["target_js"] is None:
+            fetch_orchestrate_directly(context, state, args)
 
         browser.close()
 
@@ -303,16 +323,20 @@ def capture(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="用 Playwright 自动捕获 ScienceDirect CF challenge 的 _cf_chl_opt 和 orchestrate JS。"
+        description="用 Playwright 自动捕获 CF challenge 的 _cf_chl_opt 和 orchestrate JS。"
     )
     parser.add_argument("url", nargs="?", default=DEFAULT_URL)
     parser.add_argument("--config", default="src/config/cfConfig.js")
     parser.add_argument("--target", default="target/target.js")
     parser.add_argument("--html", default="target/challenge.html")
-    parser.add_argument("--wait", type=int, default=45000, help="等待响应的毫秒数")
-    parser.add_argument("--goto-timeout", type=int, default=60000)
+    parser.add_argument("--wait", type=int, default=20000,
+                        help="等待响应的最长毫秒数（抓全即提前退出）")
+    parser.add_argument("--settle", type=int, default=3000,
+                        help="拿到 cf_config 后等多久还没等到 orchestrate 就主动抓（毫秒）")
+    parser.add_argument("--goto-timeout", type=int, default=30000)
     parser.add_argument("--headless", action="store_true")
-    parser.add_argument("--no-reload", dest="reload", action="store_false")
+    parser.add_argument("--reload", action="store_true",
+                        help="打开后显式刷新一次（默认关闭；reload 会换 cRay，通常不需要）")
     parser.add_argument("--no-save-html", dest="save_html", action="store_false")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--channel", default=os.environ.get("PW_CHROME_CHANNEL", "chrome"),
@@ -320,7 +344,7 @@ def main():
     parser.add_argument("--locale", default="zh-CN")
     parser.add_argument("--accept-language", default="zh-CN,zh;q=0.9,en;q=0.8")
     parser.add_argument("--user-agent", default=DEFAULT_UA)
-    parser.set_defaults(reload=True, save_html=True)
+    parser.set_defaults(save_html=True)
     args = parser.parse_args()
 
     if args.channel == "":

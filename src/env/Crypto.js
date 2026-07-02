@@ -1,62 +1,17 @@
 const {webcrypto, randomFillSync} = require('crypto');
 
-// 模拟一个完美的密钥对象
-const MOCK_KEY = {
-    type: 'secret',
-    extractable: true,
-    algorithm: {name: 'AES-CBC', length: 256},
-    usages: ['encrypt', 'decrypt', 'sign', 'verify', 'deriveKey', 'deriveBits', 'wrapKey', 'unwrapKey']
-};
-
-class SubtleCrypto {
-    async encrypt(algorithm, key, data) {
-        return new ArrayBuffer(0);
+// SubtleCrypto：直接委托给 Node 真实 webcrypto.subtle。
+// 旧实现把 digest/sign/encrypt 全 stub 成 0 长度 / 全 0 buffer，
+// challenge 里任何一处 SHA-256（PoW / payload 签名）都会算出全 0 → 服务端必拒。
+// 用 Proxy 包一层：保留 Symbol.toStringTag('SubtleCrypto')，同时把方法 bind 到真实 subtle，
+// 兼容 `crypto.subtle.digest(...)` 和解构后裸调 `const d = crypto.subtle.digest; d(...)` 两种写法。
+const realSubtle = webcrypto.subtle;
+const boundSubtle = new Proxy(realSubtle, {
+    get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
     }
-
-    async decrypt(algorithm, key, data) {
-        return new ArrayBuffer(0);
-    }
-
-    async sign(algorithm, key, data) {
-        return new ArrayBuffer(0);
-    }
-
-    async verify(algorithm, key, signature, data) {
-        return true;
-    }
-
-    async digest(algorithm, data) {
-        return new Uint8Array(32).buffer;
-    } // SHA-256 长度
-
-    async generateKey(algorithm, extractable, keyUsages) {
-        return MOCK_KEY;
-    }
-
-    async importKey(format, keyData, algorithm, extractable, keyUsages) {
-        return MOCK_KEY;
-    }
-
-    async exportKey(format, key) {
-        return new ArrayBuffer(0);
-    }
-
-    async deriveKey(algorithm, baseKey, derivedKeyType, extractable, keyUsages) {
-        return MOCK_KEY;
-    }
-
-    async deriveBits(algorithm, baseKey, length) {
-        return new ArrayBuffer(length ? length / 8 : 32);
-    }
-
-    async wrapKey(format, key, wrappingKey, wrapAlgorithm) {
-        return new ArrayBuffer(0);
-    }
-
-    async unwrapKey(format, wrappedKey, unwrappingKey, unwrapAlgorithm, unwrappedKeyAlgorithm, extractable, keyUsages) {
-        return MOCK_KEY;
-    }
-}
+});
 
 class Crypto {
     constructor() {
@@ -87,9 +42,8 @@ class Crypto {
 
         this.randomUUID = () => webcrypto && webcrypto.randomUUID ? webcrypto.randomUUID() : "10000000-1000-4000-8000-100000000000";
 
-        // 2. 绑定 SubtleCrypto
-        // 我们直接使用自定义的 SubtleCrypto 类，不依赖原生，防止算法不兼容导致的 Promise Reject
-        this.subtle = new SubtleCrypto();
+        // 2. 绑定真实 SubtleCrypto（不再 stub）
+        this.subtle = boundSubtle;
     }
 
     get [Symbol.toStringTag]() {
