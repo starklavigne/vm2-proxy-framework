@@ -1,10 +1,89 @@
-const fetch = require('node-fetch');
+const https = require('https');
+const http = require('http');
+const zlib = require('zlib');
 const {URL} = require('url');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const EventTarget = require('../env/EventTarget');
 const {nativize, cookieJar} = require('../utils/tools');
+
+// ---------------------------------------------------------------------------
+// 原生 https/http 请求 —— 替代 node-fetch。
+// 原因：node-fetch 的 redirect:'follow' 与 CF CDN 的 gzip+chunked 流管道有兼容问题，
+// 实测经常抛 "Invalid response body ... Premature close"。
+// 原生 https 手动跟 30x + 手动 gunzip 完全稳定。
+// ---------------------------------------------------------------------------
+const MAX_REDIRECTS = 5;
+const HTTP_TIMEOUT_MS = 30000;
+
+function _decompress(res) {
+    const enc = String(res.headers['content-encoding'] || '').toLowerCase();
+    if (enc === 'gzip') return res.pipe(zlib.createGunzip());
+    if (enc === 'deflate') return res.pipe(zlib.createInflate());
+    if (enc === 'br') { try { return res.pipe(zlib.createBrotliDecompress()); } catch (e) {} }
+    return res;
+}
+
+/**
+ * @param {string} url
+ * @param {{method:string, headers:object, body:string|Buffer|null}} opts
+ * @returns {Promise<{status:number, statusText:string, body:string, headers:object, url:string, rawSetCookie:string[]|null}>}
+ */
+function nativeRequest(url, opts = {}) {
+    const method = (opts.method || 'GET').toUpperCase();
+    const reqBody = opts.body || null;
+    const reqHeaders = Object.assign({'Accept-Encoding': 'gzip, deflate'}, opts.headers || {});
+    if (reqBody && !reqHeaders['Content-Length']) {
+        reqHeaders['Content-Length'] = Buffer.byteLength(reqBody);
+    }
+
+    const doOne = (currentUrl, hopsLeft) => new Promise((resolve, reject) => {
+        let u;
+        try { u = new URL(currentUrl); } catch (e) { return reject(new Error('Bad URL: ' + currentUrl)); }
+        const lib = u.protocol === 'https:' ? https : http;
+        const reqOpts = {
+            protocol: u.protocol,
+            hostname: u.hostname,
+            port: u.port || (u.protocol === 'https:' ? 443 : 80),
+            path: u.pathname + u.search,
+            method: hopsLeft < MAX_REDIRECTS ? 'GET' : method, // redirects become GET
+            headers: hopsLeft < MAX_REDIRECTS ? ((() => { const h = {...reqHeaders}; delete h['Content-Length']; return h; })()) : reqHeaders,
+            rejectUnauthorized: false,
+        };
+        const req = lib.request(reqOpts, (res) => {
+            // Collect raw set-cookie for caller
+            const rawSetCookie = res.headers['set-cookie'] || null;
+
+            // 3xx redirect
+            if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && hopsLeft > 0) {
+                res.resume();
+                const nextUrl = new URL(res.headers.location, currentUrl).toString();
+                return resolve(doOne(nextUrl, hopsLeft - 1));
+            }
+
+            const stream = _decompress(res);
+            const chunks = [];
+            stream.on('data', (c) => chunks.push(c));
+            stream.on('end', () => {
+                const body = Buffer.concat(chunks).toString('utf8');
+                const headers = {};
+                for (const [k, v] of Object.entries(res.headers)) {
+                    if (typeof v === 'string') headers[k.toLowerCase()] = v;
+                    else if (Array.isArray(v)) headers[k.toLowerCase()] = v.join(', ');
+                }
+                resolve({status: res.statusCode, statusText: res.statusMessage || '', body, headers, url: currentUrl, rawSetCookie});
+            });
+            stream.on('error', (e) => reject(new Error('decompress error: ' + e.message)));
+        });
+        req.setTimeout(HTTP_TIMEOUT_MS, () => req.destroy(new Error('Request timeout')));
+        req.on('error', (e) => reject(e));
+        if (reqBody && hopsLeft === MAX_REDIRECTS) req.write(reqBody);
+        req.end();
+    });
+
+    return doOne(url, MAX_REDIRECTS);
+}
 
 const CHALLENGE_URL_PATTERN = '/cdn-cgi/challenge-platform/';
 
@@ -176,27 +255,28 @@ module.exports = function (context, rawWindow, profile, opts = {}) {
         const token = recordRequest('Fetch', method, finalUrl, headers, options.body);
 
         try {
-            const response = await fetch(finalUrl, {
+            const response = await nativeRequest(finalUrl, {
                 method,
                 headers: headers,
-                body: options.body,
-                redirect: 'manual'
+                body: options.body || null,
             });
 
-            const setCookie = response.headers.raw()['set-cookie'];
-            if (setCookie) {
-                const updated = cookieJar.setCookie(setCookie);
+            if (response.rawSetCookie) {
+                const updated = cookieJar.setCookie(response.rawSetCookie);
                 console.log(`>>> [Cookie] Updated: ${updated.join(', ') || 'unknown'}`);
             }
 
-            const text = await response.text();
+            const text = response.body;
             console.log(`>>> [Network] Response (${response.status}): ${text.substring(0, 50)}...`);
 
             finalizeRecord(token, response.status, response.statusText, response.headers, text, null);
 
             return {
-                ok: response.ok, status: response.status, statusText: response.statusText, url: response.url,
-                headers: {get: (n) => response.headers.get(n)},
+                ok: response.status >= 200 && response.status < 300,
+                status: response.status,
+                statusText: response.statusText,
+                url: response.url,
+                headers: {get: (n) => response.headers[String(n).toLowerCase()] || null},
                 text: async () => text,
                 json: async () => {
                     try {
@@ -275,29 +355,25 @@ module.exports = function (context, rawWindow, profile, opts = {}) {
             console.log(`\n>>> [XHR] ${this._method} ${this._url}`);
             const token = recordRequest('XHR', this._method, this._url, reqHeaders, body);
 
-            fetch(this._url, {
+            nativeRequest(this._url, {
                 method: this._method,
                 headers: reqHeaders,
-                body: body || undefined,
-                redirect: 'manual',
-            }).then(async (resp) => {
+                body: body || null,
+            }).then((resp) => {
                 this.status = resp.status;
                 this.statusText = resp.statusText || '';
                 this.responseURL = resp.url || this._url;
 
                 // 收集响应头
-                const rawHeaders = {};
-                resp.headers.forEach((val, key) => { rawHeaders[key.toLowerCase()] = val; });
-                this._respHeaders = rawHeaders;
+                this._respHeaders = resp.headers;
 
                 // 更新 cookie
-                const setCookieArr = resp.headers.raw ? resp.headers.raw()['set-cookie'] : null;
-                if (setCookieArr) {
-                    const updated = cookieJar.setCookie(setCookieArr);
+                if (resp.rawSetCookie) {
+                    const updated = cookieJar.setCookie(resp.rawSetCookie);
                     console.log(`>>> [XHR] Cookie 已更新: ${updated.join(', ') || 'unknown'}`);
                 }
 
-                const text = await resp.text();
+                const text = resp.body;
                 this.responseText = text;
                 this.response = text;
                 this.readyState = 4;

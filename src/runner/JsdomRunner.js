@@ -124,6 +124,111 @@ class JsdomRunner {
 
         // --- 补 jsdom 缺失但真 Chrome 必有的构造器（CF 指纹会读它们的 .prototype）---
         this.installMissingConstructors();
+
+        // --- 扩展 performance：jsdom 只给了 performance.now/timeOrigin，
+        //     新版 CF 挑战 NY() 里读 performance.getEntries()/getEntriesByType()，
+        //     这些不存在会导致 setTimeout 回调直接抛 TypeError，进而走 /eb/ 错误报告路径。
+        this.installPerformanceShim();
+    }
+
+    installPerformanceShim() {
+        const window = this.window;
+        const perf = window.performance;
+        if (!perf) return;
+        const t0 = perf.timeOrigin || Date.now();
+        // 构造一个 navigation 类型的伪 entry（真浏览器一定至少有一条）
+        const navEntry = {
+            name: window.location ? window.location.href : '',
+            entryType: 'navigation',
+            startTime: 0,
+            duration: 200,
+            initiatorType: 'navigation',
+            nextHopProtocol: 'h2',
+            workerStart: 0,
+            redirectStart: 0,
+            redirectEnd: 0,
+            fetchStart: 0.1,
+            domainLookupStart: 0.2,
+            domainLookupEnd: 0.3,
+            connectStart: 0.4,
+            connectEnd: 5,
+            secureConnectionStart: 1,
+            requestStart: 6,
+            responseStart: 50,
+            responseEnd: 60,
+            transferSize: 800,
+            encodedBodySize: 400,
+            decodedBodySize: 800,
+            unloadEventStart: 0,
+            unloadEventEnd: 0,
+            domInteractive: 100,
+            domContentLoadedEventStart: 120,
+            domContentLoadedEventEnd: 121,
+            domComplete: 180,
+            loadEventStart: 190,
+            loadEventEnd: 195,
+            type: 'navigate',
+            redirectCount: 0,
+            toJSON() { return Object.assign({}, this); },
+        };
+        const entries = [navEntry];
+
+        const define = (obj, key, value) => {
+            try { Object.defineProperty(obj, key, {value, configurable: true, writable: true, enumerable: true}); }
+            catch (e) { try { obj[key] = value; } catch (e2) {} }
+        };
+
+        if (typeof perf.getEntries !== 'function') {
+            define(perf, 'getEntries', function () { return entries.slice(); });
+        }
+        if (typeof perf.getEntriesByType !== 'function') {
+            define(perf, 'getEntriesByType', function (type) {
+                return entries.filter((e) => e.entryType === type);
+            });
+        }
+        if (typeof perf.getEntriesByName !== 'function') {
+            define(perf, 'getEntriesByName', function (name, type) {
+                return entries.filter((e) => e.name === name && (!type || e.entryType === type));
+            });
+        }
+        if (typeof perf.mark !== 'function') define(perf, 'mark', function () {});
+        if (typeof perf.measure !== 'function') define(perf, 'measure', function () {});
+        if (typeof perf.clearMarks !== 'function') define(perf, 'clearMarks', function () {});
+        if (typeof perf.clearMeasures !== 'function') define(perf, 'clearMeasures', function () {});
+        if (typeof perf.clearResourceTimings !== 'function') define(perf, 'clearResourceTimings', function () {});
+        if (typeof perf.setResourceTimingBufferSize !== 'function') define(perf, 'setResourceTimingBufferSize', function () {});
+        if (!perf.timing) {
+            define(perf, 'timing', {
+                navigationStart: t0, unloadEventStart: 0, unloadEventEnd: 0,
+                redirectStart: 0, redirectEnd: 0,
+                fetchStart: t0, domainLookupStart: t0, domainLookupEnd: t0,
+                connectStart: t0, connectEnd: t0 + 5, secureConnectionStart: t0 + 1,
+                requestStart: t0 + 6, responseStart: t0 + 50, responseEnd: t0 + 60,
+                domLoading: t0 + 70, domInteractive: t0 + 100,
+                domContentLoadedEventStart: t0 + 120, domContentLoadedEventEnd: t0 + 121,
+                domComplete: t0 + 180, loadEventStart: t0 + 190, loadEventEnd: t0 + 195,
+            });
+        }
+        if (!perf.navigation) {
+            define(perf, 'navigation', {type: 0, redirectCount: 0});
+        }
+        // 若旧版 memory 字段被读到（Chrome-only），给个占位
+        if (!perf.memory) {
+            define(perf, 'memory', {jsHeapSizeLimit: 4294705152, totalJSHeapSize: 34500000, usedJSHeapSize: 22300000});
+        }
+
+        // 补对应的构造器（供 instanceof / prototype 检查用）
+        const {nativize} = require('../utils/tools');
+        const ensureCtor = (name) => {
+            if (typeof window[name] !== 'undefined') return;
+            window[name] = nativize(function () {}, name);
+        };
+        ['PerformanceEntry', 'PerformanceResourceTiming', 'PerformanceNavigationTiming',
+         'PerformancePaintTiming', 'PerformanceMark', 'PerformanceMeasure',
+         'PerformanceLongTaskTiming', 'PerformanceEventTiming',
+         'PerformanceServerTiming', 'PerformanceTiming', 'PerformanceNavigation',
+         'Performance'].forEach(ensureCtor);
+        console.log('[jsdom] performance shim: getEntries/timing/navigation 已就位');
     }
 
     installMissingConstructors() {
@@ -161,22 +266,55 @@ class JsdomRunner {
         });
         ['IntersectionObserver', 'ResizeObserver', 'PerformanceObserver', 'ReportingObserver'].forEach((n) => { if (observer(n)) added.push(n); });
 
-        // 3) ReadableStream stub（故意无 prototype.pipeTo）+ BigInt
+        // 3) ReadableStream stub（新版 target.js 需要 prototype.pipeTo 为真函数）+ BigInt
         //
-        // 设计要点：zJ() 做多项检测，其中一项是 ReadableStream.prototype.pipeTo !== undefined。
-        //   - 若我们用真实 Node.js ReadableStream（有 pipeTo）→ zJ 返回 false（不是 bot）
-        //     → zg non-bot 路径 → gWHLX 首次为 false → 直接 return → ov1 XHR 永不触发。
-        //   - 若提供无 pipeTo 的 stub → zJ 检测 pipeTo===undefined → 返回 true（bot 路径）
-        //     → zg bot 分支调 HOFt5(error_info) → ov1 XHR 触发 ✓
+        // 【策略反转】新旧 target.js 对 ReadableStream.prototype.pipeTo 检测结果的处理相反：
         //
-        // ReadableStream 必须存在（否则 zJ 读 prototype 时直接崩溃而非走检测链），
-        // 只是 prototype.pipeTo 不定义，让检测返回 true 走已知路径。
+        //   旧版 (zJ + zg + HOFt5)：
+        //     - pipeTo === undefined → zJ 返回 true（bot）→ zg bot 分支 → HOFt5 → /ov1/ XHR ✓
+        //     - 我们故意不定义 pipeTo，走 bot 路径拿到 /ov1/。
+        //
+        //   新版 (Nr + Nb)：
+        //     - pipeTo === undefined → Nr() 返回 true（bot）→ Nb 走 /eb/ 错误上报分支 ✗
+        //     - pipeTo 是函数     → Nr() 返回 false（非 bot）→ Nb 走 /fo/ 成功分支 ✓
+        //     - 现在 /fo/ 是新的 ov1 等价成功端点。
+        //
+        // 因此当前策略：ReadableStream 必须存在，且 prototype.pipeTo 必须是函数
+        // （返回 Promise.resolve()，让 await 立即完成，不阻塞 Nb 后续 navigator/NH/Nc/Nf 检测）。
         if (def('ReadableStream', function ReadableStream(source) {
             if (source && typeof source.start === 'function') {
                 const ctrl = { enqueue() {}, close() {}, error() {}, desiredSize: 1 };
                 try { source.start(ctrl); } catch (e) {}
             }
         })) added.push('ReadableStream');
+        // 反转：给 prototype 装上 pipeTo/pipeThrough/tee/getReader/cancel，让 Nr() 相关检测通过。
+        try {
+            const RS = window.ReadableStream;
+            if (RS && RS.prototype) {
+                if (typeof RS.prototype.pipeTo !== 'function') {
+                    RS.prototype.pipeTo = function pipeTo() { return Promise.resolve(); };
+                }
+                if (typeof RS.prototype.pipeThrough !== 'function') {
+                    RS.prototype.pipeThrough = function pipeThrough(t) { return (t && t.readable) || this; };
+                }
+                if (typeof RS.prototype.tee !== 'function') {
+                    RS.prototype.tee = function tee() { return [this, this]; };
+                }
+                if (typeof RS.prototype.getReader !== 'function') {
+                    RS.prototype.getReader = function getReader() {
+                        return {
+                            read() { return Promise.resolve({ done: true, value: undefined }); },
+                            releaseLock() {},
+                            cancel() { return Promise.resolve(); },
+                            closed: Promise.resolve(),
+                        };
+                    };
+                }
+                if (typeof RS.prototype.cancel !== 'function') {
+                    RS.prototype.cancel = function cancel() { return Promise.resolve(); };
+                }
+            }
+        } catch (e) {}
         // WritableStream / TransformStream 作为 no-op stub（CF 不检测 pipeTo 以外的方法）
         if (def('WritableStream', function WritableStream() {})) added.push('WritableStream');
         if (def('TransformStream', function TransformStream() {})) added.push('TransformStream');

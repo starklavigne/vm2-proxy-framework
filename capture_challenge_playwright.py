@@ -240,6 +240,7 @@ def capture(args):
             if state["orchestrate_url"]:
                 print(f"      script: {state['orchestrate_url']}")
 
+    cookies = []
     with sync_playwright() as p:
         launch_args = {}
         if args.channel:
@@ -294,7 +295,20 @@ def capture(args):
         if state["cf_config"] and state["target_js"] is None:
             fetch_orchestrate_directly(context, state, args)
 
+        # 保存 cookie（供 main.jsdom.js 使用）
+        cookies = context.cookies()
         browser.close()
+
+    # 写入 cookies
+    if cookies:
+        import json as _json
+        cookie_path = ROOT / "src" / "config" / "cfCookies.json"
+        # 只保留有效 cookie（未过期）
+        now = time.time()
+        valid_cookies = [c for c in cookies if c.get("expires", -1) <= 0 or c.get("expires", 0) > now]
+        with open(cookie_path, "w") as f:
+            _json.dump(valid_cookies, f, indent=2)
+        print(f"[write] src/config/cfCookies.json ({len(valid_cookies)} cookies)")
 
     if not state["cf_config"]:
         print("[fail] 没有捕获到包含 window._cf_chl_opt 的 403/503 HTML")
